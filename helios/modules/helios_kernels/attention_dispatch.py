@@ -119,12 +119,12 @@ def create_navit_attention_masks(
 
 @torch.compiler.disable
 def _flash_attn_wrapper(q, k, v):
-    return flash_attn_func(q, k, v)[0]
+    return flash_attn_func(q, k, v)
 
 
 @torch.compiler.disable
 def _flash_attn_varlen_wrapper(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv):
-    return flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)[0]
+    return flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
 
 
 def attn_varlen_func(q, k, v, attention_mask=None):
