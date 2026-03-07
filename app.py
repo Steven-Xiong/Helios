@@ -149,6 +149,8 @@ with gr.Blocks(css=CSS, title="Helios Video Generation", theme=gr.themes.Soft())
             <div class="link-buttons">
                 <a href="https://github.com/PKU-YuanGroup/Helios" target="_blank">💻 Code</a>
                 <a href="https://pku-yuangroup.github.io/Helios-Page" target="_blank">📄 Page</a>
+                <a href="https://www.youtube.com/watch?v=vd_AgHtOUFQ" target="_blank">🎥 Main Feature</a>
+                <a href="https://www.youtube.com/watch?v=1GeIU2Dn7UY" target="_blank">⚡ Inference Speed</a>
             </div>
         </div>
         """
