@@ -132,7 +132,7 @@ with gr.Blocks(title="Helios Video Generation") as demo:
     gr.HTML(
         """
         <div style='display: flex; align-items: center; justify-content: center; width: 100%;'>
-            <img src="https://github.com/PKU-YuanGroup/Helios-Page/blob/main/figures/logo_white.png?raw=true" style='width: 400px; height: auto;' />
+            <img src="https://raw.githubusercontent.com/SHYuanBest/shyuanbest_media/main/Helios/logo_white.png" style='width: 400px; height: auto;' />
         </div>
         <div id="header">
             <h1>🎬 Helios 14B Distilled: Real Real-Time Long Video Generation Model</h1>
