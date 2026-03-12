@@ -210,8 +210,8 @@ class TrainingConfig:
     )
     #
     has_multi_term_memory_patch: bool = field(default=False)
-    is_train_full_clean_patch_embedding: bool = field(default=False)
-    is_train_lora_clean_patch_embedding: bool = field(default=False)
+    is_train_full_multi_term_memory_patchg: bool = field(default=False)
+    is_train_lora_multi_term_memory_patchg: bool = field(default=False)
     is_train_full_patch_embedding: bool = field(default=False)
     is_train_lora_patch_embedding: bool = field(default=False)
     zero_history_timestep: bool = field(default=False)
