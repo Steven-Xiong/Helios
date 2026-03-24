@@ -898,6 +898,9 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         use_interpolate_prompt: bool = False,
         interpolate_time_list: list = [7, 7, 7],
         interpolation_steps: int = 3,
+        # ------------ Action Conditioning ------------
+        action_embeds_list: Optional[List[torch.Tensor]] = None,
+        use_interpolate_action: bool = False,
         # ------------ Stage 1 ------------
         history_sizes: list = [16, 2, 1],
         latent_window_size: int = 9,
@@ -1231,6 +1234,17 @@ class HeliosPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                         prompt_embeds = all_prompt_embeds[current_interval_idx].unsqueeze(0)
             else:
                 prompt_embeds = all_prompt_embeds
+
+            # Concatenate per-chunk action embeddings if provided
+            if action_embeds_list is not None and len(action_embeds_list) > 0:
+                action_idx = min(k, len(action_embeds_list) - 1)
+                chunk_action_embed = action_embeds_list[action_idx]
+                if chunk_action_embed.dim() == 2:
+                    chunk_action_embed = chunk_action_embed.unsqueeze(0)
+                chunk_action_embed = chunk_action_embed.to(device=prompt_embeds.device, dtype=prompt_embeds.dtype)
+                if chunk_action_embed.shape[0] != prompt_embeds.shape[0]:
+                    chunk_action_embed = chunk_action_embed.expand(prompt_embeds.shape[0], -1, -1)
+                prompt_embeds = torch.cat([prompt_embeds, chunk_action_embed], dim=1)
 
             is_first_section = k == 0
             is_second_section = k == 1

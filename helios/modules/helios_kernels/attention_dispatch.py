@@ -11,13 +11,13 @@ try:
     flash_attn_func = flash_attn3.flash_attn_func
     flash_attn_varlen_func = flash_attn3.flash_attn_varlen_func
     print("Flash Attn 3 is installed!")
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, FileNotFoundError):
     try:
         flash_attn2 = get_kernel("kernels-community/flash-attn2")
         flash_attn_func = flash_attn2.flash_attn_func
         flash_attn_varlen_func = flash_attn2.flash_attn_varlen_func
         print("Flash Attn 2 is installed!")
-    except ImportError:
+    except (ImportError, FileNotFoundError, RuntimeError):
         print("Flash Attn 2 / 3 is not installed!")
         flash_attn_varlen_func = None
         flash_attn_func = None
@@ -121,12 +121,14 @@ def create_navit_attention_masks(
 
 @torch.compiler.disable
 def _flash_attn_wrapper(q, k, v):
-    return flash_attn_func(q, k, v)
+    result = flash_attn_func(q, k, v)
+    return result[0] if isinstance(result, tuple) else result
 
 
 @torch.compiler.disable
 def _flash_attn_varlen_wrapper(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv):
-    return flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
+    result = flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
+    return result[0] if isinstance(result, tuple) else result
 
 
 def attn_varlen_func(q, k, v, attention_mask=None):

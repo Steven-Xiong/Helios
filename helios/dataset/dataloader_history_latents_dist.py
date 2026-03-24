@@ -96,8 +96,8 @@ class BucketedFeatureDataset(Dataset):
             height = int(parts[-2])
             width = int(parts[-1].replace(".pt", ""))
 
-            # keep length >= 121
-            if num_frame < 121:
+            # keep length >= 66 (minimum 2 chunks of 33 frames each)
+            if num_frame < 66:
                 continue
 
             # keep resolution
@@ -188,7 +188,7 @@ class BucketedFeatureDataset(Dataset):
         history_latent = continue_source_latent[:, start_indice : start_indice + history_window_size, :, :]
         target_latent = continue_vae_latent[:, start_indice + history_window_size : end_indice, :, :]
 
-        return x0_latent, history_latent, target_latent, clean_all_vae_latent
+        return x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx
 
     def __len__(self):
         return len(self.samples)
@@ -231,7 +231,7 @@ class BucketedFeatureDataset(Dataset):
                     base_vae_latent = torch.load(base_file_path, map_location="cpu", weights_only=False)["vae_latent"]
 
                 feature_data = torch.load(sample_info["file_path"], map_location="cpu", weights_only=False)
-                x0_latent, history_latent, target_latent, clean_all_vae_latent = self.prepare_stage1_latent(
+                x0_latent, history_latent, target_latent, clean_all_vae_latent, choice_idx = self.prepare_stage1_latent(
                     feature_data["vae_latent"], idx, base_vae_latent
                 )
                 if self.return_prompt_raw:
@@ -244,6 +244,16 @@ class BucketedFeatureDataset(Dataset):
                 txt_name = f"{file_name}.txt"
                 with open(txt_name, "w") as f:
                     f.write(sample_info["file_path"] + "\n")
+
+        # Resolve per-chunk action: use chunk_actions[choice_idx] if available,
+        # otherwise fall back to the global action_keys/action_mouse
+        chunk_actions = feature_data.get("chunk_actions", None)
+        if chunk_actions is not None and choice_idx < len(chunk_actions):
+            action_keys = chunk_actions[choice_idx].get("keys", "None")
+            action_mouse = chunk_actions[choice_idx].get("mouse", "·")
+        else:
+            action_keys = feature_data.get("action_keys", "None")
+            action_mouse = feature_data.get("action_mouse", "·")
 
         output_dict = {
             "uttid": sample_info["uttid"],
@@ -258,6 +268,8 @@ class BucketedFeatureDataset(Dataset):
             "clean_all_latents": clean_all_vae_latent,
             "prompt_embeds": feature_data["prompt_embed"],
             "prompt_attention_masks": feature_data.get("prompt_attention_mask", None),
+            "action_keys": action_keys,
+            "action_mouse": action_mouse,
         }
 
         if self.return_prompt_raw:

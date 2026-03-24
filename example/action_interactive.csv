@@ -1,0 +1,15 @@
+id,prompt_index,prompt,action_keys,action_mouse
+1,0,"A first-person view of walking through a medieval castle courtyard. Stone walls and towers surround the area, with torches flickering along the pathways.",W,→
+1,1,"A first-person view of walking through a medieval castle courtyard. Stone walls and towers surround the area, with torches flickering along the pathways.",W,→
+1,2,"A first-person view of walking through a medieval castle courtyard. Stone walls and towers surround the area, with torches flickering along the pathways.",W+A,·
+1,3,"A first-person view of walking through a medieval castle courtyard. Stone walls and towers surround the area, with torches flickering along the pathways.",W,←
+1,4,"A first-person view of walking through a medieval castle courtyard. Stone walls and towers surround the area, with torches flickering along the pathways.",None,·
+2,0,"A first-person view of exploring a dense tropical jungle. Sunlight filters through the canopy, illuminating lush green vegetation and exotic flowers.",W,·
+2,1,"A first-person view of exploring a dense tropical jungle. Sunlight filters through the canopy, illuminating lush green vegetation and exotic flowers.",W+D,→
+2,2,"A first-person view of exploring a dense tropical jungle. Sunlight filters through the canopy, illuminating lush green vegetation and exotic flowers.",W,↑
+2,3,"A first-person view of exploring a dense tropical jungle. Sunlight filters through the canopy, illuminating lush green vegetation and exotic flowers.",S,↓
+3,0,"A first-person view of walking down a neon-lit cyberpunk city street at night. Holographic advertisements float above the crowd.",W,·
+3,1,"A first-person view of walking down a neon-lit cyberpunk city street at night. Holographic advertisements float above the crowd.",W,→
+3,2,"A first-person view of walking down a neon-lit cyberpunk city street at night. Holographic advertisements float above the crowd.",W+A,←
+3,3,"A first-person view of walking down a neon-lit cyberpunk city street at night. Holographic advertisements float above the crowd.",None,→
+3,4,"A first-person view of walking down a neon-lit cyberpunk city street at night. Holographic advertisements float above the crowd.",W,·

@@ -15,7 +15,7 @@
 import html
 import math
 from itertools import accumulate
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 import numpy as np
 import regex as re
@@ -863,6 +863,8 @@ class HeliosPipeline(DiffusionPipeline, HeliosLoraLoaderMixin):
         add_noise_to_video_latents: bool = True,
         video_noise_sigma_min: float = 0.111,
         video_noise_sigma_max: float = 0.135,
+        # ------------ Action Conditioning ------------
+        action_embeds_list: Optional[list] = None,
         # ------------ Interactive ------------
         use_interpolate_prompt: bool = False,
         interpolate_time_list: list = [7, 7, 7],
@@ -1211,6 +1213,17 @@ class HeliosPipeline(DiffusionPipeline, HeliosLoraLoaderMixin):
                         prompt_embeds = all_prompt_embeds[current_interval_idx].unsqueeze(0)
             else:
                 prompt_embeds = all_prompt_embeds
+
+            # Concatenate per-chunk action embedding if provided
+            if action_embeds_list is not None and len(action_embeds_list) > 0:
+                action_idx = min(k, len(action_embeds_list) - 1)
+                chunk_action_embed = action_embeds_list[action_idx]
+                if chunk_action_embed.dim() == 2:
+                    chunk_action_embed = chunk_action_embed.unsqueeze(0)
+                chunk_action_embed = chunk_action_embed.to(
+                    device=prompt_embeds.device, dtype=prompt_embeds.dtype
+                )
+                prompt_embeds = torch.cat([prompt_embeds, chunk_action_embed], dim=1)
 
             is_first_chunk = k == 0
             is_second_chunk = k == 1

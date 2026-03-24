@@ -40,6 +40,8 @@ class DataConfig:
     )
     # ---- Stage 1 ----
     use_stage1_dataset: bool = field(default=False)
+    # ---- Action Conditioning ----
+    action_embeds_cache_path: Optional[str] = field(default=None)
     # ---- Stage 3 ----
     use_stage3_dataset: bool = field(default=False)
     gan_data_root: Optional[list] = field(default_factory=list)
@@ -98,6 +100,7 @@ class ValidationConfig:
     validation_latent_window_size: list[int] = field(default_factory=lambda: [9])
     validation_stream_chunk_size: list[int] = field(default_factory=lambda: [3])
     first_step_valid: bool = field(default=True)
+    val_output_dir: Optional[str] = field(default=None)
     num_validation_videos: int = field(default=1)
     num_inference_steps: int = field(default=30)
     # ---- Stage 1 ----

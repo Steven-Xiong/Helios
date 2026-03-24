@@ -1,5 +1,7 @@
+import functools
 import importlib
 import os
+import re
 
 
 os.environ["HF_ENABLE_PARALLEL_LOADING"] = "yes"
@@ -12,7 +14,6 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
-
 
 if importlib.util.find_spec("torch_npu") is not None:
     import torch_npu
@@ -56,6 +57,13 @@ def parse_args():
     )
     parser.add_argument("--output_folder", type=str, default="./output_helios")
     parser.add_argument("--enable_compile", action="store_true")
+    parser.add_argument(
+        "--attention_backend",
+        type=str,
+        default="auto",
+        choices=["auto", "_flash_3", "flash", "_native_flash", "native"],
+        help="Attention backend. 'auto' tries _flash_3 → flash → _native_flash → native.",
+    )
 
     # === Generation parameters ===
     # environment
@@ -149,6 +157,11 @@ def parse_args():
         default=None,
     )
 
+    # === Action Conditioning ===
+    parser.add_argument("--action_embeds_cache", type=str, default=None, help="Path to action_embeds_cache.pt")
+    parser.add_argument("--action_keys", type=str, default=None, help="Keyboard action (e.g. W, W+A, None)")
+    parser.add_argument("--action_mouse", type=str, default=None, help="Mouse action (e.g. →, ↑←, ·)")
+
     # === Context parallelism ===
     # Please refer to https://huggingface.co/docs/diffusers/v0.37.0/en/training/distributed_inference#context-parallelism
     parser.add_argument("--enable_parallelism", action="store_true")
@@ -178,6 +191,64 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+@functools.lru_cache(maxsize=1)
+def _resolve_attention_backend() -> str:
+    """Probe once per process and cache the best available attention backend."""
+    import torch as _torch
+    cuda_major = _torch.cuda.get_device_capability()[0]
+    candidates = (
+        ["_flash_3", "flash", "_native_flash", "native"] if cuda_major >= 9
+        else ["flash", "_native_flash", "native"]
+    )
+    for backend in candidates:
+        try:
+            # Import diffusers check function directly to avoid building a full model
+            from diffusers.models.attention_dispatch import _check_attention_backend_requirements
+            from diffusers.models.attention_dispatch import AttentionBackendName
+            _check_attention_backend_requirements(AttentionBackendName(backend))
+            return backend
+        except Exception:
+            continue
+    return "native"
+
+
+def read_prompt_table(path: str) -> pd.DataFrame:
+    """Read a prompt table (CSV or TSV) and normalize to a common schema.
+
+    Output always has at least:
+      - id         : unique sample identifier (str)
+      - prompt     : generation prompt (str)
+      - image_name : first-frame filename relative to base_image_prompt_path (str, may be empty)
+
+    Supported input formats:
+      CSV  columns: id, prompt, image_name, [action_class, action_keys, action_mouse, ...]
+      TSV  columns: action_class, prompt, video_name, [action_keys, action_mouse, ...]
+    """
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in {".tsv", ".tab"}:
+        df = pd.read_csv(path, sep="\t")
+    elif suffix == ".csv":
+        df = pd.read_csv(path, sep=",")
+    else:
+        df = pd.read_csv(path, sep=None, engine="python")
+
+    # TSV format uses video_name instead of id / image_name — normalize here
+    if "video_name" in df.columns and "id" not in df.columns:
+        stems = df["video_name"].astype(str).map(
+            lambda x: os.path.splitext(os.path.basename(x))[0]
+        )
+        df = df.copy()
+        df["id"] = stems
+        if "image_name" not in df.columns:
+            df["image_name"] = stems + ".jpg"
+
+    # Ensure image_name column always exists
+    if "image_name" not in df.columns:
+        df["image_name"] = ""
+
+    return df
 
 
 def main():
@@ -241,16 +312,12 @@ def main():
         transformer = replace_rmsnorm_with_fp32(transformer)
         transformer = replace_all_norms_with_flash_norms(transformer)
         replace_rope_with_flash_rope()
-    cuda_major = torch.cuda.get_device_capability()[0]
-    if cuda_major >= 9:
-        # H100/H800 (SM90+) with FA3
-        try:
-            transformer.set_attention_backend("_flash_3_hub")
-        except Exception:
-            transformer.set_attention_backend("flash_hub")
+    if args.attention_backend != "auto":
+        transformer.set_attention_backend(args.attention_backend)
+        print(f"[Attention] Using user-specified backend: {args.attention_backend}")
     else:
-        # 4090/A100 etc (SM89+) with FA2
-        transformer.set_attention_backend("flash_hub")
+        transformer.set_attention_backend(_resolve_attention_backend())
+        print(f"[Attention] Using backend: {_resolve_attention_backend()}")
 
     vae = AutoencoderKLWan.from_pretrained(
         args.base_model_path,
@@ -270,8 +337,44 @@ def main():
     )
 
     if args.lora_path is not None:
-        pipe.load_lora_weights(args.lora_path, adapter_name="default")
-        pipe.set_adapters(["default"], adapter_weights=[1.0])
+        import safetensors.torch
+        lora_file = os.path.join(args.lora_path, "pytorch_lora_weights.safetensors")
+        if os.path.isfile(args.lora_path):
+            lora_file = args.lora_path
+        full_state = safetensors.torch.load_file(lora_file)
+
+        lora_state = {k: v for k, v in full_state.items() if "lora" in k}
+        norm_state = {k: v for k, v in full_state.items() if "lora" not in k}
+        print(f"Loaded checkpoint: {len(lora_state)} LoRA keys, {len(norm_state)} norm keys")
+
+        if lora_state:
+            from peft import LoraConfig, set_peft_model_state_dict
+            lora_rank = lora_state[next(k for k in lora_state if "lora_A" in k)].shape[0]
+            lora_config = LoraConfig(
+                r=lora_rank, lora_alpha=lora_rank,
+                init_lora_weights="gaussian",
+                target_modules="all-linear",
+                exclude_modules=["down", "up"],
+            )
+            transformer.add_adapter(lora_config, adapter_name="default")
+            transformer_key_prefix = "transformer."
+            peft_state = {k[len(transformer_key_prefix):]: v for k, v in lora_state.items()
+                          if k.startswith(transformer_key_prefix)}
+            incompatible = set_peft_model_state_dict(transformer, peft_state, adapter_name="default")
+            if incompatible.missing_keys:
+                print(f"  Warning: {len(incompatible.missing_keys)} missing LoRA keys")
+            if incompatible.unexpected_keys:
+                print(f"  Warning: {len(incompatible.unexpected_keys)} unexpected LoRA keys")
+
+        if norm_state:
+            strip_prefix = "transformer.transformer."
+            norm_renamed = {}
+            for k, v in norm_state.items():
+                nk = k[len(strip_prefix):] if k.startswith(strip_prefix) else k
+                norm_renamed[nk] = v
+            info = transformer.load_state_dict(norm_renamed, strict=False)
+            loaded_norms = len(norm_renamed) - len(info.unexpected_keys)
+            print(f"  Loaded {loaded_norms} norm weights into transformer")
 
         if args.partial_path is not None:
             if not hasattr(args, "training_config"):
@@ -315,6 +418,127 @@ def main():
             raise ValueError(f"Unsupported cp_backend: {args.cp_backend}")
 
         pipe.transformer.enable_parallelism(config=cp_config)
+
+    # Load action embedding cache if provided
+    action_embeds_cache = None
+    if args.action_embeds_cache is not None and os.path.exists(args.action_embeds_cache):
+        action_embeds_cache = torch.load(args.action_embeds_cache, map_location="cpu", weights_only=False)
+        print(f"Loaded action embedding cache with {len(action_embeds_cache)} entries")
+
+    # ── Prompt → (keys, mouse) parsing (mirrors YUME generate_per_sample_captions) ──
+    _CLAUSE_PAT = re.compile(
+        r',?\s*the camera (moves|pans|tilts) (forward|backward|left|right|up|down)'
+    )
+    _MOVE_TO_KEY = {"forward": "W", "backward": "S", "left": "A", "right": "D"}
+    _ROT_TO_MOUSE = {
+        "pans left": "←", "pans right": "→",
+        "tilts up": "↑", "tilts down": "↓",
+    }
+
+    def parse_prompt_to_chunk_actions(prompt_text, num_chunks):
+        """Parse camera clauses from prompt into per-chunk (keys, mouse) pairs.
+
+        Adjacent move+rotation clauses (no significant text between them) are
+        merged into a single combined action, e.g. "the camera moves forward,
+        the camera pans left" → ("W", "←") instead of two separate chunks.
+        Non-camera text gaps (>=20 chars) become ("None", "·") segments.
+        Segments are distributed evenly across num_chunks.
+        """
+        matches = list(_CLAUSE_PAT.finditer(prompt_text))
+        if not matches:
+            return [("None", "·")] * num_chunks
+
+        MIN_ACTION_LEN = 20
+
+        raw_clauses = []
+        prev_end = 0
+        for m in matches:
+            gap = prompt_text[prev_end:m.start()].strip(", ")
+            raw_clauses.append((gap, m.group(1), m.group(2)))
+            prev_end = m.end()
+        trailing = prompt_text[prev_end:].strip(", .")
+
+        segments = []
+        i = 0
+        while i < len(raw_clauses):
+            gap, verb, direction = raw_clauses[i]
+
+            if len(gap) >= MIN_ACTION_LEN:
+                segments.append(("None", "·"))
+
+            if verb == "moves":
+                keys = _MOVE_TO_KEY[direction]
+                mouse = "·"
+            else:
+                keys = "None"
+                mouse = _ROT_TO_MOUSE[f"{verb} {direction}"]
+
+            if i + 1 < len(raw_clauses):
+                next_gap, next_verb, next_dir = raw_clauses[i + 1]
+                can_merge = len(next_gap) < MIN_ACTION_LEN
+                if can_merge:
+                    is_move = verb == "moves"
+                    next_is_move = next_verb == "moves"
+                    if is_move and not next_is_move:
+                        mouse = _ROT_TO_MOUSE[f"{next_verb} {next_dir}"]
+                        i += 2
+                        segments.append((keys, mouse))
+                        continue
+                    elif not is_move and next_is_move:
+                        keys = _MOVE_TO_KEY[next_dir]
+                        i += 2
+                        segments.append((keys, mouse))
+                        continue
+
+            segments.append((keys, mouse))
+            i += 1
+
+        if len(trailing) >= MIN_ACTION_LEN:
+            segments.append(("None", "·"))
+
+        if not segments:
+            return [("None", "·")] * num_chunks
+
+        n = len(segments)
+        base = num_chunks // n
+        remainder = num_chunks % n
+        actions = []
+        for i, seg in enumerate(segments):
+            steps = base + (1 if i < remainder else 0)
+            actions.extend([seg] * steps)
+        return actions
+
+    def build_action_embeds_from_prompt(prompt_text, num_chunks, cache):
+        """Parse prompt camera clauses → per-chunk action embeddings."""
+        if cache is None:
+            return None
+        chunk_actions = parse_prompt_to_chunk_actions(prompt_text, num_chunks)
+        embeds = []
+        for keys, mouse in chunk_actions:
+            embed = cache.get((keys, mouse), cache.get(("None", "·")))
+            embeds.append(embed)
+        return embeds
+
+    def build_action_embeds_list_from_csv(group_df, cache):
+        """Build per-chunk action embeddings from CSV columns."""
+        if cache is None:
+            return None
+        if "action_keys" not in group_df.columns or "action_mouse" not in group_df.columns:
+            return None
+        embeds = []
+        for _, row in group_df.iterrows():
+            ak = row.get("action_keys", "None")
+            am = row.get("action_mouse", "·")
+            embed = cache.get((ak, am), cache.get(("None", "·")))
+            embeds.append(embed)
+        return embeds
+
+    def build_action_embeds_list_single(ak, am, num_chunks, cache):
+        """Build action embeddings for a single repeated action."""
+        if cache is None or ak is None or am is None:
+            return None
+        embed = cache.get((ak, am), cache.get(("None", "·")))
+        return [embed] * num_chunks
 
     if args.prompt_txt_path is not None:
         with open(args.prompt_txt_path, "r") as f:
@@ -375,19 +599,36 @@ def main():
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
     elif args.image_prompt_csv_path is not None:
-        df = pd.read_csv(args.image_prompt_csv_path)
+        df = read_prompt_table(args.image_prompt_csv_path)
         if not args.enable_parallelism:
             df = df.iloc[rank::world_size]
 
         for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing prompts"):
-            # output_path = os.path.join(args.output_folder, f"{idx}.mp4")
             output_path = os.path.join(args.output_folder, f"{row['id']}.mp4")
             if os.path.exists(output_path):
                 print("skipping!")
                 continue
 
             prompt = row.get("refined_prompt") or row["prompt"]
-            image_path = os.path.join(args.base_image_prompt_path, row["image_name"])
+            image_path = (
+                os.path.join(args.base_image_prompt_path, str(row["image_name"]))
+                if args.base_image_prompt_path and row["image_name"]
+                else None
+            )
+
+            num_chunks = max(1, args.num_frames // 33)
+            if "action_keys" in df.columns and "action_mouse" in df.columns:
+                row_action_embeds = build_action_embeds_list_single(
+                    str(row["action_keys"]), str(row["action_mouse"]),
+                    num_chunks, action_embeds_cache,
+                )
+            else:
+                row_action_embeds = build_action_embeds_from_prompt(
+                    prompt, num_chunks, action_embeds_cache,
+                )
+            if rank == 0 and row_action_embeds:
+                parsed = parse_prompt_to_chunk_actions(prompt, num_chunks)
+                print(f"  [{row['id']}] chunks={num_chunks}, actions={parsed}")
 
             with torch.no_grad():
                 try:
@@ -427,13 +668,16 @@ def main():
                         use_interpolate_prompt=args.use_interpolate_prompt,
                         interpolation_steps=args.interpolation_steps,
                         interpolate_time_list=interpolate_time_list,
+                        # action conditioning
+                        action_embeds_list=row_action_embeds,
                     ).frames[0]
-                except Exception:
+                except Exception as e:
+                    print(f"Error processing {row['id']}: {e}")
                     continue
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
     elif args.interactive_prompt_csv_path is not None:
-        df = pd.read_csv(args.interactive_prompt_csv_path)
+        df = read_prompt_table(args.interactive_prompt_csv_path)
 
         df = df.sort_values(by=["id", "prompt_index"])
         all_video_ids = df["id"].unique()
@@ -457,6 +701,9 @@ def main():
             else:
                 prompt_list = group_df["prompt"].tolist()
             interpolate_time_list = [args.interpolate_time] * len(prompt_list)
+
+            # Build per-chunk action embeddings from CSV
+            csv_action_embeds = build_action_embeds_list_from_csv(group_df, action_embeds_cache)
 
             with torch.no_grad():
                 try:
@@ -496,16 +743,22 @@ def main():
                         use_interpolate_prompt=args.use_interpolate_prompt,
                         interpolation_steps=args.interpolation_steps,
                         interpolate_time_list=interpolate_time_list,
+                        # action conditioning
+                        action_embeds_list=csv_action_embeds,
                     ).frames[0]
                 except Exception:
                     continue
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
     else:
+        # Build action embeds for single action mode
+        single_action_embeds = build_action_embeds_list_single(
+            args.action_keys, args.action_mouse,
+            num_chunks=max(1, args.num_frames // 33),
+            cache=action_embeds_cache,
+        )
+
         with torch.no_grad():
-            # import time
-            # for _ in range(20):
-            #     start_time = time.time()
             output = pipe(
                 prompt=prompt,
                 negative_prompt=args.negative_prompt,
@@ -540,6 +793,8 @@ def main():
                 use_interpolate_prompt=args.use_interpolate_prompt,
                 interpolation_steps=args.interpolation_steps,
                 interpolate_time_list=interpolate_time_list,
+                # action conditioning
+                action_embeds_list=single_action_embeds,
             ).frames[0]
             # elapsed_time = time.time() - start_time
             # print(f"Inference time: {elapsed_time:.2f} seconds ({elapsed_time/60:.2f} minutes)")
@@ -554,6 +809,32 @@ def main():
             export_to_video(output, output_path, fps=24)
 
     print(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.3f} GB")
+
+    # ── Generate HTML visualization (rank 0 only) ──
+    if rank == 0 and args.image_prompt_csv_path is not None:
+        from visualize_results import build_eval_html
+
+        html_dir = os.path.join(args.output_folder, "html")
+        html_path = os.path.join(html_dir, "results.html")
+        print(f"Generating HTML visualization → {html_path}")
+        build_eval_html(
+            video_dir=args.output_folder,
+            label_path=args.image_prompt_csv_path,
+            first_frame_dir=args.base_image_prompt_path,
+            output_path=html_path,
+        )
+    elif rank == 0 and args.interactive_prompt_csv_path is not None:
+        from visualize_results import build_eval_html
+
+        html_dir = os.path.join(args.output_folder, "html")
+        html_path = os.path.join(html_dir, "results.html")
+        print(f"Generating HTML visualization → {html_path}")
+        build_eval_html(
+            video_dir=args.output_folder,
+            label_path=args.interactive_prompt_csv_path,
+            first_frame_dir=None,
+            output_path=html_path,
+        )
 
 
 if __name__ == "__main__":

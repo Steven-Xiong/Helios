@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import transformers
 from accelerate import Accelerator, DistributedType
@@ -108,7 +109,54 @@ if is_torch_npu_available():
     torch.npu.config.allow_internal_format = False
 
 
+def patch_deepspeed_zero_none_grad_hook():
+    try:
+        from deepspeed.runtime.zero import stage_1_and_2 as ds_zero12
+    except Exception:
+        return
+
+    cls = ds_zero12.DeepSpeedZeroOptimizer
+    if getattr(cls, "_helios_none_grad_patch_applied", False):
+        return
+
+    orig_fn = cls.reduce_independent_p_g_buckets_and_remove_grads
+
+    def _patched_reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
+        grad_reduc = self.get_gradient_for_reduction(param)
+        if grad_reduc is None:
+            # Some parameters are conditionally unused for a given step. In this case
+            # ZeRO-2 should skip reduction for that parameter instead of touching a None gradient.
+            return
+        return orig_fn(self, param, i)
+
+    cls.reduce_independent_p_g_buckets_and_remove_grads = _patched_reduce_independent_p_g_buckets_and_remove_grads
+    cls._helios_none_grad_patch_applied = True
+    print("Applied DeepSpeed ZeRO None-grad guard patch")
+
+
+def set_distributed_timeout(timeout):
+    if not dist.is_available() or not dist.is_initialized():
+        return
+
+    try:
+        from torch.distributed import distributed_c10d as c10d
+
+        # Update the default world group timeout.
+        c10d._set_pg_timeout(timeout)
+
+        # Update all currently registered process groups to avoid mixed timeout values.
+        world = getattr(c10d, "_world", None)
+        pg_map = getattr(world, "pg_map", None)
+        if pg_map:
+            for pg in list(pg_map.keys()):
+                c10d._set_pg_timeout(timeout, pg)
+    except Exception as e:
+        logger.warning(f"Failed to update distributed timeout to {timeout}: {e}")
+
+
 def main(args):
+    patch_deepspeed_zero_none_grad_hook()
+
     if args.data_config.use_stage3_dataset:
         from helios.dataset.dataloader_dmd import (
             BucketedFeatureDataset,
@@ -168,6 +216,7 @@ def main(args):
         deepspeed_plugins=deepspeed_plugins,
         kwargs_handlers=[kwargs, init_kwargs],
     )
+    set_distributed_timeout(timedelta(seconds=7200))
     if (
         accelerator.distributed_type == DistributedType.DEEPSPEED
         and args.training_config.is_train_dmd
@@ -478,7 +527,6 @@ def main(args):
         )
         if args.training_config.is_train_dmd:
             assert args.model_config.critic_lora_name_or_path is not None
-            assert args.model_config.load_dcp
 
     if args.model_config.critic_lora_name_or_path is not None:
         load_model_checkpoint(
@@ -1010,6 +1058,12 @@ def main(args):
     if args.model_config.load_checkpoints_custom:
         assert initial_global_step == 0
 
+    # Load action embedding cache if configured
+    action_embeds_cache = None
+    if args.data_config.action_embeds_cache_path and os.path.exists(args.data_config.action_embeds_cache_path):
+        action_embeds_cache = torch.load(args.data_config.action_embeds_cache_path, map_location="cpu", weights_only=False)
+        logger.info(f"Loaded action embeddings cache with {len(action_embeds_cache)} entries from {args.data_config.action_embeds_cache_path}")
+
     progress_bar = tqdm(
         range(0, args.training_config.max_train_steps),
         initial=initial_global_step,
@@ -1192,6 +1246,20 @@ def main(args):
                         gan_prompt_embeds = batch["gan_prompt_embeds"].to(
                             accelerator.device, dtype=weight_dtype, non_blocking=True
                         )
+                        if action_embeds_cache is not None:
+                            gan_ak_list = batch.get("gan_action_keys", None)
+                            gan_am_list = batch.get("gan_action_mouse", None)
+                            if gan_ak_list is not None and gan_am_list is not None:
+                                gan_action_embed_list = []
+                                for ak, am in zip(gan_ak_list, gan_am_list):
+                                    ae = action_embeds_cache.get((ak, am))
+                                    if ae is None:
+                                        ae = action_embeds_cache.get(("None", "·"))
+                                    gan_action_embed_list.append(ae)
+                                gan_action_batch = torch.stack(gan_action_embed_list).to(
+                                    device=accelerator.device, dtype=gan_prompt_embeds.dtype
+                                )
+                                gan_prompt_embeds = torch.cat([gan_prompt_embeds, gan_action_batch], dim=1)
                         if args.training_config.is_use_gt_history:
                             text_prompt_raws = batch["gan_prompt_raws"]
                             text_prompt_embeds = gan_prompt_embeds
@@ -1220,6 +1288,22 @@ def main(args):
                 elif args.data_config.use_stage1_dataset:
                     # Prepare prompt embeds
                     prompt_embeds = batch["prompt_embeds"].to(accelerator.device)
+
+                    # Concatenate action embeddings if cache is available
+                    if action_embeds_cache is not None:
+                        action_keys_list = batch.get("action_keys", None)
+                        action_mouse_list = batch.get("action_mouse", None)
+                        if action_keys_list is not None and action_mouse_list is not None:
+                            action_embed_list = []
+                            for ak, am in zip(action_keys_list, action_mouse_list):
+                                ae = action_embeds_cache.get((ak, am))
+                                if ae is None:
+                                    ae = action_embeds_cache.get(("None", "·"))
+                                action_embed_list.append(ae)
+                            action_embeds_batch = torch.stack(action_embed_list).to(
+                                device=accelerator.device, dtype=prompt_embeds.dtype
+                            )
+                            prompt_embeds = torch.cat([prompt_embeds, action_embeds_batch], dim=1)
 
                     # Prepare stage1 clean data
                     history_latents = batch["history_latents"].to(accelerator.device)
@@ -2078,6 +2162,9 @@ def main(args):
                     args.validation_config.validation_prompts is not None
                     and global_step % args.validation_config.validation_steps == 0
                 ) or (args.validation_config.first_step_valid and global_step == (initial_global_step + 1)):
+                    # Validation runs on rank 0 only; keep all ranks aligned and use a longer timeout.
+                    set_distributed_timeout(timedelta(seconds=7200))
+                    accelerator.wait_for_everyone()
                     if args.training_config.is_train_dmd and args.training_config.dmd_is_low_vram_mode:
                         vram_manager.move_to_cpu(real_score_model)
 
@@ -2153,15 +2240,50 @@ def main(args):
 
                             all_videos = []
                             all_prompts = []
-                            for validation_prompt in args.validation_config.validation_prompts:
+
+                            # Build validation samples: use training data (I2V) if available, else text prompts
+                            val_samples = []
+                            if args.data_config.use_stage1_dataset and args.data_config.instance_data_root:
+                                import glob as _glob
+                                import random as _random
+                                _val_rng = _random.Random(args.seed + global_step)
+                                _all_pts = []
+                                for _folder in args.data_config.instance_data_root:
+                                    _all_pts.extend(_glob.glob(os.path.join(_folder, "*.pt")))
+                                _val_rng.shuffle(_all_pts)
+                                _num_val = min(len(args.validation_config.validation_prompts), len(_all_pts))
+                                for _pt_path in _all_pts[:_num_val]:
+                                    try:
+                                        _pt = torch.load(_pt_path, map_location="cpu", weights_only=False)
+                                        _img = _pt["first_frames_image"]  # (3, H, W) uint8
+                                        if _img.dim() == 3:
+                                            _img = _img.permute(1, 2, 0).numpy()  # (H, W, 3)
+                                        from PIL import Image
+                                        _pil_img = Image.fromarray(_img)
+                                        _prompt = _pt.get("prompt_raw", "A first-person view egocentric scene.")
+                                        _chunk_act = _pt.get("chunk_actions", [{}])
+                                        _act = _chunk_act[0] if _chunk_act else {}
+                                        val_samples.append({"prompt": _prompt, "image": _pil_img, "action": _act})
+                                    except Exception:
+                                        continue
+
+                            if not val_samples:
+                                for vp in args.validation_config.validation_prompts:
+                                    val_samples.append({"prompt": vp, "image": None, "action": {}})
+
+                            for _vs in val_samples:
                                 pipeline_args = {
-                                    "prompt": args.data_config.id_token + validation_prompt,
+                                    "prompt": args.data_config.id_token + _vs["prompt"],
                                     "negative_prompt": "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards",
                                     "guidance_scale": args.validation_config.validation_guidance_scale,
                                     "num_frames": args.validation_config.validation_max_num_frames,
                                     "height": args.validation_config.validation_height,
                                     "width": args.validation_config.validation_width,
                                     "num_inference_steps": args.validation_config.num_inference_steps,
+                                    # I2V: use first frame from training data
+                                    "image": _vs["image"],
+                                    "image_noise_sigma_min": 0.111,
+                                    "image_noise_sigma_max": 0.135,
                                     # For Stage 1
                                     "history_sizes": args.training_config.history_sizes,
                                     "latent_window_size": args.validation_config.validation_latent_window_size[0],
@@ -2176,7 +2298,17 @@ def main(args):
                                     # For Stage 3
                                     "use_dmd": args.training_config.is_train_dmd,
                                     "is_amplify_first_chunk": args.training_config.is_amplify_first_chunk,
+                                    # Action conditioning
+                                    "action_embeds_list": None,
                                 }
+
+                                # Inject action embedding if cache is available
+                                if action_embeds_cache is not None and _vs["action"]:
+                                    _ak = _vs["action"].get("keys", "None")
+                                    _am = _vs["action"].get("mouse", "·")
+                                    _ae = action_embeds_cache.get((_ak, _am))
+                                    if _ae is not None:
+                                        pipeline_args["action_embeds_list"] = [_ae]
 
                                 videos, prompt = log_validation(
                                     pipe=pipe,
@@ -2193,17 +2325,28 @@ def main(args):
                                 if tracker.name == "wandb":
                                     video_logs = []
 
+                                    val_save_dir = args.validation_config.val_output_dir or args.output_dir
+                                    os.makedirs(val_save_dir, exist_ok=True)
+
                                     for i, (video, prompt) in enumerate(zip(all_videos, all_prompts)):
                                         filename = os.path.join(
-                                            args.output_dir,
+                                            val_save_dir,
                                             f"global_step{global_step}_{phase_name}_video_{i}_{prompt[:25].replace(' ', '_')}.mp4",
                                         )
-                                        export_to_video(video, filename, fps=30)
+                                        export_to_video(video, filename, fps=24)
                                         video_logs.append(
                                             wandb.Video(filename, caption=f"{i}: {prompt}", format="mp4")
                                         )
 
                                     tracker.log({phase_name: video_logs}, step=global_step)
+
+                            try:
+                                from visualize_results import build_validation_html
+
+                                html_path = os.path.join(val_save_dir, "html", "results.html")
+                                build_validation_html(val_save_dir, html_path)
+                            except Exception as e:
+                                main_print(f"[visualize] HTML generation failed: {e}")
 
                             videos = None
                             prompt = None
@@ -2232,6 +2375,7 @@ def main(args):
                             del pipe
                             free_memory()
 
+                    accelerator.wait_for_everyone()
                     if (
                         args.training_config.use_ema_validation
                         and args.training_config.use_ema
@@ -2403,15 +2547,26 @@ def main(args):
                     if tracker.name == "wandb":
                         video_logs = []
 
+                        val_save_dir = args.validation_config.val_output_dir or args.output_dir
+                        os.makedirs(val_save_dir, exist_ok=True)
+
                         for i, (video, prompt) in enumerate(zip(all_videos, all_prompts)):
                             filename = os.path.join(
-                                args.output_dir,
+                                val_save_dir,
                                 f"global_step{global_step}_{phase_name}_video_{i}_{prompt[:25].replace(' ', '_')}.mp4",
                             )
-                            export_to_video(video, filename, fps=30)
+                            export_to_video(video, filename, fps=24)
                             video_logs.append(wandb.Video(filename, caption=f"{i}: {prompt}", format="mp4"))
 
                         tracker.log({phase_name: video_logs}, step=global_step)
+
+                try:
+                    from visualize_results import build_validation_html
+
+                    html_path = os.path.join(val_save_dir, "html", "results.html")
+                    build_validation_html(val_save_dir, html_path)
+                except Exception as e:
+                    main_print(f"[visualize] HTML generation failed: {e}")
 
     accelerator.end_training()
 

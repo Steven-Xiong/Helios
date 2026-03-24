@@ -224,7 +224,7 @@ class BucketedFeatureDataset(Dataset):
             history_latent_2 = continue_source_latent[:, start_indice_2 : start_indice_2 + history_window_size, :, :]
             target_latent_2 = continue_vae_latent[:, start_indice_2 + history_window_size : end_indice_2, :, :]
 
-        return (x0_latent, history_latent, target_latent), (x0_latent_2, history_latent_2, target_latent_2)
+        return (x0_latent, history_latent, target_latent, choice_idx), (x0_latent_2, history_latent_2, target_latent_2)
 
     def set_epoch(self, epoch):
         self._epoch = epoch
@@ -244,27 +244,31 @@ class BucketedFeatureDataset(Dataset):
                     gan_feature = torch.load(gan_sample["file_path"], map_location="cpu", weights_only=False)
                     if self.is_use_gt_history:
                         (
-                            (x0_latent, history_latent, target_latent),
+                            (x0_latent, history_latent, target_latent, choice_idx),
                             (x0_latent_2, history_latent_2, target_latent_2),
                         ) = self.prepare_stage1_latent(
                             gan_feature["vae_latent"],
                             idx,
                             return_secondary=self.return_secondary,
                         )
-                        output_dict.update(
-                            {
-                                "gan_uttid": gan_sample["uttid"],
-                                "gan_dataset_name": gan_sample["dataset_name"],
-                                "gan_vae_latents": target_latent,
-                                "gan_x0_latents": x0_latent,
-                                "gan_history_latents": history_latent,
-                                "gan_vae_latents_2": target_latent_2,
-                                "gan_x0_latents_2": x0_latent_2,
-                                "gan_history_latents_2": history_latent_2,
-                                "gan_prompt_raws": gan_feature["prompt_raw"],
-                                "gan_prompt_embeds": gan_feature["prompt_embed"],
-                            }
-                        )
+                        update_dict = {
+                            "gan_uttid": gan_sample["uttid"],
+                            "gan_dataset_name": gan_sample["dataset_name"],
+                            "gan_vae_latents": target_latent,
+                            "gan_x0_latents": x0_latent,
+                            "gan_history_latents": history_latent,
+                            "gan_vae_latents_2": target_latent_2,
+                            "gan_x0_latents_2": x0_latent_2,
+                            "gan_history_latents_2": history_latent_2,
+                            "gan_prompt_raws": gan_feature["prompt_raw"],
+                            "gan_prompt_embeds": gan_feature["prompt_embed"],
+                        }
+                        chunk_actions = gan_feature.get("chunk_actions", [])
+                        if chunk_actions and choice_idx < len(chunk_actions):
+                            act = chunk_actions[choice_idx]
+                            update_dict["gan_action_keys"] = act.get("keys", "None")
+                            update_dict["gan_action_mouse"] = act.get("mouse", "·")
+                        output_dict.update(update_dict)
                     else:
                         output_dict.update(
                             {

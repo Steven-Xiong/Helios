@@ -264,7 +264,33 @@ def load_extra_components(args, model, checkpoint_path):
                     k.replace(f"{p_name}.", ""): v for k, v in state_dict.items() if k.startswith(f"{p_name}.")
                 }
                 patch_module = getattr(model, p_name)
-                load_info = patch_module.load_state_dict(patch_state, strict=False)
+
+                # Handle PEFT-saved format: remap base_layer.* → * and merge LoRA
+                has_peft_keys = any(k.startswith("base_layer.") for k in patch_state)
+                if has_peft_keys:
+                    base_state = {}
+                    lora_a, lora_b = None, None
+                    for k, v in patch_state.items():
+                        if k.startswith("base_layer."):
+                            base_state[k.replace("base_layer.", "")] = v
+                        elif "lora_A" in k:
+                            lora_a = v
+                        elif "lora_B" in k:
+                            lora_b = v
+
+                    if lora_a is not None and lora_b is not None and "weight" in base_state:
+                        r = lora_a.shape[0]
+                        # lora_B: [C_out, r, 1, 1, 1], lora_A: [r, C_in, D, H, W]
+                        lora_b_2d = lora_b.reshape(lora_b.shape[0], r)
+                        lora_a_flat = lora_a.reshape(r, -1)
+                        delta_w = (lora_b_2d @ lora_a_flat).reshape(base_state["weight"].shape)
+                        base_state["weight"] = base_state["weight"] + delta_w
+                        print(f"  Merged LoRA (rank={r}) into {p_name} base weight")
+
+                    load_info = patch_module.load_state_dict(base_state, strict=False)
+                else:
+                    load_info = patch_module.load_state_dict(patch_state, strict=False)
+
                 loaded_keys.update(patch_keys_in_sd)
 
                 print(f"Loaded {len(patch_keys_in_sd)} parameters for {p_name}")
