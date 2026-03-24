@@ -9,6 +9,29 @@ We use a three-stage progressive pipeline, all the setting can be found [here](.
   <img src="https://raw.githubusercontent.com/PKU-YuanGroup/Helios-Page/main/figures/training_configs.png">
 </div>
 
+### Data Preparation
+
+Please refer to [this guide](./tools/offload_data/README.md) for how to obtain the training data required by Helios. And we prepare a toy training data [here](https://huggingface.co/BestWishYsh/HeliosBench-Weights/tree/main/demo_data).
+
+### Run the model
+
+```bash
+# Use DDP
+bash scripts/training/train_ddp.sh
+
+# or
+
+# Use DeepSpeed
+bash scripts/training/train_deepspeed.sh
+```
+
+Training configuration can be adjusted in `scripts/training/configs`. You can use `scripts/training/compare_yaml.py` to check for configuration completeness or differences between stages.
+
+### Model Merging
+
+After training, you can use this [script](./tools/merge_lora_for_helios.py) to merge all the checkpoints and obtain the final safetensors file, similar to [this](https://huggingface.co/BestWishYsh/Helios-Distilled/tree/main/transformer).
+
+
 ## 💡 Important
 
 Based on the findings in [issue #38](https://github.com/PKU-YuanGroup/Helios/issues/38), we have identified several areas with potential for further improving Helios's performance. These include fixing the train-inference inconsistency in i2v to address the issue where i2v tends to produce very slow motion at the beginning, as well as fully enabling Easy Anti-Drifting to enhance Helios's resistance to quality degradation over time. For the relevant configuration details, please refer to [correct.yaml](./correct.yaml).
