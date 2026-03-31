@@ -128,47 +128,6 @@ def get_action_for_frame(actions, frame_idx):
     return "None", "·"
 
 
-class VideoPreprocessDataset(torch.utils.data.Dataset):
-    """Loads and preprocesses videos in DataLoader worker processes so that
-    CPU-bound video decoding overlaps with GPU-bound VAE encoding."""
-
-    def __init__(self, video_paths, target_height, target_width, max_frames):
-        self.video_paths = video_paths
-        self.height = target_height
-        self.width = target_width
-        self.max_frames = max_frames
-
-    def __len__(self):
-        return len(self.video_paths)
-
-    def __getitem__(self, idx):
-        video_path = self.video_paths[idx]
-        video_name = os.path.splitext(os.path.basename(video_path))[0]
-
-        try:
-            video, _, _ = torchvision.io.read_video(video_path, pts_unit="sec")
-        except Exception:
-            return {"video_name": video_name, "pixel_values": None, "num_frames": 0}
-
-        num_frames = video.shape[0]
-        if num_frames < 33:
-            return {"video_name": video_name, "pixel_values": None, "num_frames": 0}
-
-        if self.max_frames > 0 and num_frames > self.max_frames:
-            video = video[:self.max_frames]
-            num_frames = self.max_frames
-
-        pixel_values = video.permute(0, 3, 1, 2).float() / 127.5 - 1.0
-        del video
-        if pixel_values.shape[2] != self.height or pixel_values.shape[3] != self.width:
-            pixel_values = torch.nn.functional.interpolate(
-                pixel_values, size=(self.height, self.width), mode="bilinear", align_corners=False
-            )
-        pixel_values = pixel_values.permute(1, 0, 2, 3)  # (C, T, H, W)
-
-        return {"video_name": video_name, "pixel_values": pixel_values, "num_frames": num_frames}
-
-
 def load_video_captions_tsv(tsv_path):
     """
     Load the TSV file mapping video_name -> (action_class, prompt).
@@ -227,8 +186,8 @@ def main():
     parser.add_argument("--target_width", type=int, default=640)
     parser.add_argument("--max_frames", type=int, default=0,
                         help="Max frames to use per video (0 = no limit)")
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="DataLoader workers for parallel video loading")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="Number of 33-frame chunks to VAE-encode at once")
     args = parser.parse_args()
 
     dist.init_process_group(backend="nccl")
@@ -314,30 +273,38 @@ def main():
             print("Nothing to do — all videos already processed.")
         return
 
-    dataset = VideoPreprocessDataset(pending_videos, height, width, args.max_frames)
-    loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=1,
-        num_workers=args.num_workers,
-        prefetch_factor=2 if args.num_workers > 0 else None,
-        persistent_workers=args.num_workers > 0,
-        collate_fn=lambda batch: batch[0],
-        shuffle=False,
-    )
+    pbar = tqdm(pending_videos, desc=f"[Rank {global_rank}]", disable=global_rank != 0)
+    for video_path in pbar:
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        free_memory()
 
-    pbar = tqdm(loader, desc=f"[Rank {global_rank}]", total=len(pending_videos),
-                disable=global_rank != 0)
-    for sample in pbar:
-        video_name = sample["video_name"]
-        pixel_values = sample.get("pixel_values")
-        num_frames = sample["num_frames"]
-
-        if pixel_values is None:
+        try:
+            video, _, info = torchvision.io.read_video(video_path, pts_unit="sec")
+        except Exception as e:
+            print(f"[Rank {global_rank}] Error loading {video_path}: {e}")
             continue
+
+        num_frames = video.shape[0]
+        if num_frames < frame_window_size:
+            del video
+            continue
+
+        if args.max_frames > 0 and num_frames > args.max_frames:
+            video = video[:args.max_frames]
+            num_frames = args.max_frames
 
         output_path = os.path.join(args.output_dir, f"{video_name}_{num_frames}_{height}_{width}.pt")
         if os.path.exists(output_path):
+            del video
             continue
+
+        pixel_values = video.permute(0, 3, 1, 2).float() / 127.5 - 1.0
+        del video
+        if pixel_values.shape[2] != height or pixel_values.shape[3] != width:
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values, size=(height, width), mode="bilinear", align_corners=False
+            )
+        pixel_values = pixel_values.permute(1, 0, 2, 3)  # (C, T, H, W)
 
         actions = actions_by_video.get(video_name, [])
         tsv_info = video_captions.get(video_name, None)
@@ -353,17 +320,25 @@ def main():
             num_chunks = num_frames // frame_window_size
             history_latent_list = []
             chunk_actions = []
-            for i in range(num_chunks):
-                start = i * frame_window_size
-                end = start + frame_window_size
-                chunk = pixel_values[:, :, start:end, :, :]
-                chunk_latent = vae.encode(chunk).latent_dist.sample()
-                chunk_latent = (chunk_latent - latents_mean) * latents_std
-                history_latent_list.append(chunk_latent)
 
-                mid_frame = start + frame_window_size // 2
+            for i in range(num_chunks):
+                mid_frame = i * frame_window_size + frame_window_size // 2
                 ck, cm = get_action_for_frame(actions, mid_frame)
                 chunk_actions.append({"keys": ck, "mouse": cm})
+
+            for batch_start in range(0, num_chunks, args.batch_size):
+                batch_end = min(batch_start + args.batch_size, num_chunks)
+                chunks = []
+                for i in range(batch_start, batch_end):
+                    start = i * frame_window_size
+                    end = start + frame_window_size
+                    chunks.append(pixel_values[0, :, start:end, :, :])
+                chunk_batch = torch.stack(chunks, dim=0)  # (B, C, 33, H, W)
+                batch_latents = vae.encode(chunk_batch).latent_dist.sample()
+                batch_latents = (batch_latents - latents_mean) * latents_std
+                for j in range(batch_latents.shape[0]):
+                    history_latent_list.append(batch_latents[j:j+1])
+                del chunk_batch, batch_latents
 
             vae_latent = torch.stack(history_latent_list, dim=1)
 

@@ -19,25 +19,53 @@ LOCAL_MODELS="/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/BestWishYSH"
 # ============================================================
 # 4a. 推理 — Stage 1 (Helios-Base, 50 steps)
 # ============================================================
-CKPT="ckpts/helios/stage1_action_20260322_020120/checkpoint-2500"
-TIMESTAMP_INFER=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR="./output_helios/eval_seadance2_stage1_${TIMESTAMP_INFER}"
+# CKPT="ckpts/helios/stage1_action_20260322_020120/checkpoint-2500"
+# TIMESTAMP_INFER=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR="./output_helios/eval_seadance2_stage1_${TIMESTAMP_INFER}"
+
+# torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Base" \
+#     --transformer_path "$LOCAL_MODELS/Helios-Base" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path data/seadance2_yume_v3/world_model_action12_train_3000_simple1cam_actionfirst.tsv \
+#     --base_image_prompt_path data/seadance2_yume_v3/first_frame\
+#     --action_embeds_cache data/helios/action_embeds_cache.pt \
+#     --lora_path "$CKPT" \
+#     --partial_path "$CKPT/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR" \
+#     --num_frames 321 \
+#     --height 384 \
+#     --width 640 \
+#     --num_inference_steps 50 \
+#     --guidance_scale 5.0 \
+#     --fps 24
+
+# ============================================================
+# 4a-sekai. 推理 — Stage 1, yume_training (Sekai) data
+#   Sekai CSVs (videoFile,caption,...) are auto-detected by infer_helios.py.
+#   Multiple CSVs can be comma-separated in --image_prompt_csv_path.
+#   First frames: extracted via extract_first_frames.py → data/yume_training/first_frame/
+# ============================================================
+CKPT_SEKAI="ckpts/helios/stage1_action_20260322_020120/checkpoint-2500"
+TIMESTAMP_SEKAI=$(date +%Y%m%d_%H%M%S)
+OUTPUT_DIR_SEKAI="./output_helios/eval_yume_training_stage1_${TIMESTAMP_SEKAI}"
 
 torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
     --base_model_path "$LOCAL_MODELS/Helios-Base" \
     --transformer_path "$LOCAL_MODELS/Helios-Base" \
     --sample_type i2v \
-    --image_prompt_csv_path data/seadance2_yume_v3/world_model_action12_train_3000_simple1cam_actionfirst.tsv \
-    --base_image_prompt_path data/seadance2_yume_v3/first_frame\
+    --image_prompt_csv_path "data/Sekai-Project/train/sekai-real-walking-hq.csv,data/Sekai-Project/train/sekai-game-walking.csv,data/Sekai-Project/train/sekai-game-drone.csv" \
+    --base_image_prompt_path data/yume_training/first_frame \
     --action_embeds_cache data/helios/action_embeds_cache.pt \
-    --lora_path "$CKPT" \
-    --partial_path "$CKPT/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR" \
+    --lora_path "$CKPT_SEKAI" \
+    --partial_path "$CKPT_SEKAI/transformer_partial.pth" \
+    --output_folder "$OUTPUT_DIR_SEKAI" \
     --num_frames 321 \
     --height 384 \
     --width 640 \
     --num_inference_steps 50 \
     --guidance_scale 5.0 \
+    --max_samples 100 \
     --fps 24
 
 # ============================================================
@@ -68,6 +96,34 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --fps 24
 
 # ============================================================
+# 4b-sekai. 推理 — Stage 2, yume_training (Sekai) data
+# ============================================================
+# CKPT_S2_SEKAI="ckpts/helios/stage2_action_XXXXXXXX_XXXXXX/checkpoint-XXXX"
+# TIMESTAMP_S2_SEKAI=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S2_SEKAI="./output_helios/eval_yume_training_stage2_${TIMESTAMP_S2_SEKAI}"
+#
+# torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Mid" \
+#     --transformer_path "$LOCAL_MODELS/Helios-Base" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "data/Sekai-Project/train/sekai-real-walking-hq.csv,data/Sekai-Project/train/sekai-game-walking.csv,data/Sekai-Project/train/sekai-game-drone.csv" \
+#     --base_image_prompt_path data/yume_training/first_frame \
+#     --action_embeds_cache data/helios/action_embeds_cache.pt \
+#     --lora_path "$CKPT_S2_SEKAI" \
+#     --partial_path "$CKPT_S2_SEKAI/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S2_SEKAI" \
+#     --num_frames 321 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 5.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 20 20 20 \
+#     --use_zero_init \
+#     --zero_steps 1 \
+#     --max_samples 100 \
+#     --fps 24
+
+# ============================================================
 # 4c. 推理 — Stage 3 (pyramid 2+2+2)
 # ============================================================
 # CKPT_S3="/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/ckpts/helios/stage3_action_20260318_211239/checkpoint-1000"
@@ -91,6 +147,33 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --is_enable_stage2 \
 #     --pyramid_num_inference_steps_list 2 2 2 \
 #     --is_amplify_first_chunk \
+#     --fps 24
+
+# ============================================================
+# 4c-sekai. 推理 — Stage 3, yume_training (Sekai) data
+# ============================================================
+# CKPT_S3_SEKAI="ckpts/helios/stage3_action_XXXXXXXX_XXXXXX/checkpoint-XXXX"
+# TIMESTAMP_S3_SEKAI=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S3_SEKAI="./output_helios/eval_yume_training_stage3_${TIMESTAMP_S3_SEKAI}"
+#
+# torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Distilled" \
+#     --transformer_path "$LOCAL_MODELS/Helios-Base" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "data/Sekai-Project/train/sekai-real-walking-hq.csv,data/Sekai-Project/train/sekai-game-walking.csv,data/Sekai-Project/train/sekai-game-drone.csv" \
+#     --base_image_prompt_path data/yume_training/first_frame \
+#     --action_embeds_cache data/helios/action_embeds_cache.pt \
+#     --lora_path "$CKPT_S3_SEKAI" \
+#     --partial_path "$CKPT_S3_SEKAI/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S3_SEKAI" \
+#     --num_frames 321 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 1.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 2 2 2 \
+#     --is_amplify_first_chunk \
+#     --max_samples 100 \
 #     --fps 24
 
 

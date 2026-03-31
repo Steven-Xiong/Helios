@@ -79,86 +79,118 @@ Helios/
 
 ---
 
-## 3. 三阶段训练流程
+## 3. 六阶段完整训练流程
 
 ### 3.1 总体架构
 
-所有三个阶段都以 `Helios-Base`（Wan2.1-14B）为 transformer 基座，通过 **LoRA** 微调。各阶段通过 checkpoint 继承：
+原版论文实际使用 6 阶段 **init→merge→post** 渐进式训练。每个 stage 内部分 init（初始学习）和 post（精调）两步，中间通过 **LoRA merge 进基座** 衔接：
 
 ```
-Stage 1 ─→ Stage 2 ─→ Stage 3
-  (Base + LoRA)  加载 S1 ckpt   加载 S2 ckpt
+Helios-Base (Wan2.1-14B)
+  │ stage-1-init (LR=5e-5, 学习 AR 能力)
+  │ train LoRA → fuse_lora() → save merged transformer
+  ↓
+merged_s1_init
+  │ stage-1-post (LR=3e-5, 精调)
+  │ fresh LoRA on merged base → fuse_lora() → save
+  ↓
+Our-Helios-Base (≈ 原版 Helios-Base/transformer)
+  │ stage-2-init (LR=1e-4, 学习金字塔)
+  │ train LoRA → fuse_lora() → save
+  ↓
+merged_s2_init
+  │ stage-2-post (LR=3e-5, 精调 + 额外可训模块)
+  │ fresh LoRA → fuse_lora() → save
+  ↓
+Our-Helios-Mid (≈ 原版 Helios-Mid/transformer)
+  │ stage-3-ode (LR=2e-6, ODE regression only)
+  │ train LoRA → fuse_lora() → save
+  ↓
+Our-transformer_ode (≈ 原版 Helios-Distilled/transformer_ode)
+  │ stage-3-post (LR=2e-6, DMD 对抗蒸馏)
+  │ fresh LoRA + critic → fuse_lora() → save
+  ↓
+Our-Helios-Distilled (≈ 原版 Helios-Distilled/transformer)
 ```
 
-### 3.2 Stage 1 — Autoregressive History Conditioning
+**关键区别**：每个阶段训完后，LoRA 通过 `pipe.fuse_lora()` 合并进基座权重，下一个阶段从全新的 LoRA 开始训练。这等于两次 rank-128 的适应，表达能力远强于单次 LoRA。
 
-**目标**：学习 chunk-by-chunk 长视频生成能力
+### 3.2 Stage 1-init — Autoregressive History Conditioning（初始学习）
+
+**目标**：从 Helios-Base 出发，学习 chunk-by-chunk 长视频生成 + action conditioning
 
 | 配置项 | 值 |
 |--------|-----|
 | 基座 | `Helios-Base` |
-| 数据集 | `dataloader_history_latents_dist`（预编码 .pt） |
-| 调度器 | `UniPCMultistepScheduler`（50 步） |
 | LoRA rank | 128 |
-| LoRA 目标 | `all-linear`，排除 `down`/`up` |
-| 额外训练模块 | `patch_short/mid/long`（full），`patch_embedding`（LoRA） |
-| History sizes | `[16, 2, 1]`（long, mid, short） |
-| Latent window | 9（→ 33 帧/chunk） |
 | 学习率 | 5e-5 |
+| 额外训练模块 | `patch_short/mid/long`（full），`patch_embedding`（LoRA），norm layers |
 | 损失 | Flow matching loss，`weighting_scheme: logit_normal` |
-| Action | 通过 `action_embeds_cache.pt` 注入 |
+| 配置文件 | `stage_1_action_init.yaml` |
 
-**关键机制**：
-- `patch_short`：Conv3D(1,2,2) 处理短期历史（1 帧）
-- `patch_mid`：Conv3D(2,4,4) 处理中期历史（2 帧）
-- `patch_long`：Conv3D(4,8,8) 处理长期历史（16 帧）
-- History latent 拼接到主序列前面，经 transformer 联合 attention
+### 3.3 Stage 1-post — Autoregressive History Conditioning（精调）
 
-### 3.3 Stage 2 — Multi-Stage Pyramid Refinement
+**目标**：在 merged S1-init 基座上进一步精调，更低学习率
+
+| 配置项 | 值 |
+|--------|-----|
+| 基座 | merged S1-init transformer（**不是** Helios-Base） |
+| LoRA rank | 128 |
+| 学习率 | **3e-5**（比 init 低） |
+| 额外训练模块 | 同 init |
+| 配置文件 | `stage_1_action_post.yaml` |
+
+### 3.4 Stage 2-init — Multi-Stage Pyramid Refinement（初始学习）
 
 **目标**：学习从粗到细的多分辨率去噪
 
 | 配置项 | 值 |
 |--------|-----|
-| 基座 | `Helios-Base` + Stage 1 ckpt |
-| 数据集 | 同 Stage 1 |
-| 调度器 | `HeliosScheduler`（stages=3） |
-| Pyramid stages | 3（各 20 步推理） |
-| Stage range | `[0, 1/3, 2/3, 1]` |
+| 基座 | merged S1-post transformer（Our-Helios-Base） |
 | LoRA rank | 128 |
-| 额外训练模块 | patch 冻结 |
 | 学习率 | 1e-4 |
-| 损失 | Flow matching loss，`weighting_scheme: none` |
+| `stage2_sample_ratios` | `[1, 2, 1]` |
+| 配置文件 | `stage_2_action_init.yaml` |
 
-**关键机制**：
-- Stage 0：1/4 分辨率生成初始 latent
-- Stage 1：2× 上采样 + renoise + 去噪细化
-- Stage 2：2× 上采样 + renoise + 去噪到最终分辨率
-- `stage2_sample_ratios: [1, 2, 1]` 控制各阶段采样比例
+### 3.5 Stage 2-post — Pyramid Refinement（精调 + 额外模块）
 
-### 3.4 Stage 3 — Adversarial Hierarchical Distillation (DMD)
+**目标**：合并后精调，加入 patch_embedding 和 multi_term_memory patch 的 LoRA
+
+| 配置项 | 值 |
+|--------|-----|
+| 基座 | merged S2-init transformer |
+| LoRA rank | 128 |
+| 学习率 | **3e-5** |
+| 新增可训模块 | `patch_embedding`(LoRA), `patch_short/mid/long`(LoRA) |
+| `stage2_sample_ratios` | **`[1, 1, 1]`**（与 init 不同） |
+| 配置文件 | `stage_2_action_post.yaml` |
+
+### 3.6 Stage 3-ode — ODE Regression（学会少步预测）
+
+**目标**：用 ODE regression loss 学会少步数预测基础，不做对抗训练
+
+| 配置项 | 值 |
+|--------|-----|
+| 基座 | merged S2-post transformer（Our-Helios-Mid） |
+| LoRA rank | 128 |
+| 学习率 | 2e-6 |
+| 训练模式 | **ODE only**（`is_train_dmd: false`, `is_only_ode_regression: true`） |
+| EMA | `decay: 0.99`, `start_step: 250` |
+| 配置文件 | `stage_3_action_ode.yaml` |
+
+### 3.7 Stage 3-post — Adversarial Hierarchical Distillation (DMD)
 
 **目标**：将 20+20+20 步蒸馏到 2+2+2 步
 
 | 配置项 | 值 |
 |--------|-----|
-| 基座 | `Helios-Base` + Stage 2 ckpt |
-| 数据集 | `dataloader_dmd`（GAN/ODE/TEXT .pt） |
-| 训练模式 | DMD（generator + critic 交替训练） |
+| 基座 | merged S3-ode transformer（Our-transformer_ode） |
+| LoRA rank | 128 |
 | Generator 学习率 | 2e-6 |
 | Critic 学习率 | 4e-7 |
-| Critic LoRA rank | 128 |
-| Update ratio | `dfake_gen_update_ratio: 5`（每 5 次 critic 更新 1 次 generator） |
-| 蒸馏步数 | `dmd_denoising_step_list: [1000, 750, 500, 250]` |
-| EMA | `decay: 0.99`，`start_step: 750` |
-| 额外训练模块 | `patch_short/mid/long`（LoRA） |
-| `guidance_scale` | 1.0 |
-
-**关键机制**：
-- Generator 生成 fake sample，Critic 给分 → 对抗训练
-- ODE regression loss 保证一致性
-- `is_use_gt_history: true` → 用真实历史 latent 作为条件
-- `is_amplify_first_chunk: true` → 第一个 chunk 用更多步数
+| 训练模式 | DMD 对抗训练（`is_train_dmd: true`） |
+| EMA | `decay: 0.99`, `start_step: 750` |
+| 配置文件 | `stage_3_action_post.yaml` |
 
 ---
 
@@ -399,30 +431,50 @@ torchrun --nproc_per_node 8 tools/offload_data/convert_sekai_to_helios.py \
     --output_dir data/helios/seadance2_v2_helios_latents
 ```
 
-### 9.2 训练
+### 9.2 训练（完整 6 阶段流水线）
+
+完整流程在 `run.sh` 中自动化执行。每个阶段训完后会自动 merge LoRA 进基座，再启动下一阶段：
 
 ```bash
-# Stage 1
-accelerate launch --config_file scripts/accelerate_configs/multi_node_example_zero2.yaml \
-    train_helios.py --config scripts/training/configs/stage_1_action_init.yaml
+# 一键运行完整 6 阶段训练
+bash run.sh
+```
 
-# Stage 2（需要在 yaml 中设置 load_model_path 指向 Stage 1 checkpoint）
-accelerate launch --config_file scripts/accelerate_configs/multi_node_example_zero2.yaml \
-    train_helios.py --config scripts/training/configs/stage_2_action_init.yaml
+流程自动执行：
+1. **Stage 1-init** → train → merge LoRA into base
+2. **Stage 1-post** → train on merged base → merge again
+3. **Stage 2-init** → train → merge
+4. **Stage 2-post** → train on merged base → merge → Our-Helios-Mid
+5. **Stage 3-ode** → train ODE regression → merge → Our-transformer_ode
+6. **Stage 3-post** → train DMD adversarial → merge → Our-Helios-Distilled
 
-# Stage 3（需要在 yaml 中设置 load_model_path 和 critic_lora_name_or_path 指向 Stage 2 checkpoint）
-accelerate launch --config_file scripts/accelerate_configs/multi_node_example_zero2.yaml \
-    train_helios.py --config scripts/training/configs/stage_3_action_post.yaml
+LoRA merge 通过 `tools/merge_lora_action.py` 完成：
+```bash
+python tools/merge_lora_action.py \
+    --base_transformer_path <base_model> \
+    --base_pipeline_path <pipeline_model> \
+    --lora_checkpoint_path <checkpoint_dir> \
+    --output_path <merged_output> \
+    --has_multi_term_memory_patch \
+    --zero_history_timestep \
+    --guidance_cross_attn
 ```
 
 ### 9.3 推理
 
 ```bash
-# Action 模型推理（Stage 3 checkpoint）
-bash run.sh
-
-# 原版模型对比
-bash run_org.sh
+# 推理使用最终 merged transformer（不再需要 --lora_path）
+CUDA_VISIBLE_DEVICES=0 python infer_helios.py \
+    --base_model_path "BestWishYsh/Helios-Distilled" \
+    --transformer_path "<Our-Helios-Distilled merged path>" \
+    --sample_type i2v \
+    --prompt "..." \
+    --num_frames 321 \
+    --guidance_scale 1.0 \
+    --is_enable_stage2 \
+    --pyramid_num_inference_steps_list 2 2 2 \
+    --is_amplify_first_chunk \
+    --output_folder "./output_helios/test"
 ```
 
 ### 9.4 单样本推理示例
@@ -453,10 +505,12 @@ CUDA_VISIBLE_DEVICES=0 python infer_helios.py \
 
 1. **PEFT exclude_modules warning**：PEFT v0.18.1 对 `exclude_modules=["down", "up"]` 报 warning（模型中无同名模块），多创建的 LoRA 位为零初始化，无影响。
 
-2. **base_model_path vs transformer_path**：Stage 3 推理必须分开指定——scheduler 来自 Distilled（stages=3），transformer 来自 Base（与训练一致）。
+2. **LoRA merge 是关键步骤**：每个 init→post 之间必须执行 `fuse_lora()` 合并。如果跳过 merge 直接用 `load_checkpoints_custom` 加载 LoRA，等于在同一个基座上叠加 LoRA，不是原版的 "merge → re-LoRA" 模式，表达能力会受限。
 
-3. **Patch 加载**：训练保存的 partial checkpoint 中 patch 权重为 PEFT 格式（`base_layer.*`），加载时自动 remap 并合并 LoRA（见 `load_extra_components`）。
+3. **Merge 后推理不再需要 --lora_path**：merge 后的 transformer 是完整的 safetensors 权重，直接作为 `--transformer_path` 使用。
 
 4. **Action embedding 维度**：每个 action embedding 为 `(1, seq_len, 4096)`，拼接到 prompt_embeds 的 sequence 维度。
 
-5. **Stage 3 训练基座问题**：当前 action 训练三阶段均使用 `Helios-Base` 做基座。原版 Stage 3 使用 `Helios-Distilled` 的 `transformer_ode` subfolder。如果需要更好的少步推理质量，可考虑以 Distilled 为基座重训 Stage 3。
+5. **LoRA rank 对照 paper**：原版 Stage 2/3 使用 rank=256，当前 action 配置使用 rank=128。如需对齐 paper，修改对应 yaml 的 `lora_rank` 和 `lora_alpha`。
+
+6. **Stage 3 推理 scheduler**：最终推理时 `base_model_path` 需用 `Helios-Distilled`（提供 `stages=3` + `scheduler_type=dmd` 的 scheduler config），`transformer_path` 指向 Our-Helios-Distilled 的 merged transformer。

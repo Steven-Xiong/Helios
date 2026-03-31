@@ -42,8 +42,8 @@ model_config:
   enable_slicing: false
   enable_tiling: false
   # ---- Lora ----
-  lora_rank: 128
-  lora_alpha: 128.0
+  lora_rank: 256
+  lora_alpha: 256.0
   lora_dropout: 0.0
   lora_layers: "all-linear"
   lora_exclude_modules:
@@ -83,14 +83,14 @@ training_config:
   # ---- Training Resource ----
   max_train_steps: 2000
   train_batch_size: 1
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   checkpointing_steps: 500
   resume_from_checkpoint: "latest"
   save_checkpoints_custom: false
   # ---- Optimizer ----
   learning_rate: 1e-4
   lr_scheduler: "constant_with_warmup"
-  lr_warmup_steps: 500
+  lr_warmup_steps: 200
   optimizer: "adamw"
   adam_beta1: 0.9
   adam_beta2: 0.999
@@ -120,8 +120,9 @@ training_config:
   latent_window_size:
     - 9
   is_random_drop: true
+  random_drop_i2v_ratio: 0.4
   random_drop_v2v_ratio: 0.4
-  random_drop_t2v_ratio: 0.4
+  random_drop_t2v_ratio: 0.3
   corrupt_model_input: false
   corrupt_mode_model_input: "noise"
   corrupt_mode_prob_model_input: 0.9

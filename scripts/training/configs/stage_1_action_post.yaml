@@ -1,11 +1,11 @@
-output_dir: /mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/ckpts/helios/stage1_action
-logging_dir: /mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/output_helios/stage1_action/logs
-seed: 43
+output_dir: /mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/ckpts/helios/stage1_action_post
+logging_dir: /mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/output_helios/stage1_action_post/logs
+seed: 44
 
 
 report_to:
   tracker_name: Helios-Action-WorldModel
-  wandb_name: action_world_model_stage1
+  wandb_name: action_world_model_stage1_post
   report_to: wandb
 
 
@@ -20,7 +20,7 @@ data_config:
   single_width: 640
   dataloader_num_workers: 16
   prefetch_factor: 2
-  caption_dropout_p: 0.1
+  caption_dropout_p: 0
   id_token: ""
   instance_data_root:
     - "data/helios/seadance2_v2_helios_latents"
@@ -32,8 +32,11 @@ data_config:
 
 model_config:
   # ---- Path ----
-  pretrained_model_name_or_path: "/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/BestWishYSH/Helios-Base"
-  transformer_model_name_or_path: "/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/BestWishYSH/Helios-Base"
+  # NOTE: pretrained_model_name_or_path provides VAE/text_encoder/scheduler
+  pretrained_model_name_or_path: "BestWishYsh/Helios-Base"
+  # NOTE: transformer_model_name_or_path points to the MERGED init transformer
+  # This will be overridden by run.sh to point to the actual merged output
+  transformer_model_name_or_path: "PLACEHOLDER_MERGED_S1_INIT"
   load_checkpoints_custom: false
   load_dcp: false
   # ---- Vae ----
@@ -49,7 +52,7 @@ model_config:
     - down
     - up
   # ---- Other ----
-  train_norm_layers: true
+  train_norm_layers: false
 
 
 validation_config:
@@ -84,7 +87,8 @@ training_config:
   resume_from_checkpoint: "latest"
   save_checkpoints_custom: false
   # ---- Optimizer ----
-  learning_rate: 5e-5
+  # NOTE: post phase uses lower LR than init (3e-5 vs 5e-5), matching paper stage-1-post
+  learning_rate: 3e-5
   lr_scheduler: "constant"
   lr_warmup_steps: 200
   optimizer: "adamw"
@@ -119,7 +123,6 @@ training_config:
   random_drop_i2v_ratio: 0.4
   random_drop_v2v_ratio: 0.4
   random_drop_t2v_ratio: 0.3
-  # Frame-aware corruption for anti-drifting
   corrupt_model_input: false
   corrupt_history: true
   corrupt_mode_history: "noise"
@@ -135,6 +138,8 @@ training_config:
   # Multi-term memory
   is_amplify_history: false
   history_scale_mode: "per_head"
+  # NOTE: post phase starts from merged base, patch modules are already baked in
+  # Fresh LoRA on patch_embedding; patch_short/mid/long already merged, train with LoRA
   is_train_full_patch_embedding: false
   is_train_lora_patch_embedding: true
   has_multi_term_memory_patch: true

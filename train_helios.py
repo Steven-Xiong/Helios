@@ -363,9 +363,10 @@ def main(args):
         "is_amplify_history": args.training_config.is_amplify_history,
         "history_scale_mode": args.training_config.history_scale_mode,
     }
+    _subfolder = args.model_config.subfolder if args.model_config.subfolder is not None else "transformer"
     transformer = HeliosTransformer3DModel.from_pretrained(
         args.model_config.transformer_model_name_or_path,
-        subfolder=args.model_config.subfolder or "transformer",
+        subfolder=_subfolder,
         transformer_additional_kwargs=transformer_additional_kwargs,
     )
     transformer = replace_rmsnorm_with_fp32(transformer)
@@ -391,9 +392,10 @@ def main(args):
             "gan_hooks": args.training_config.gan_hooks,
         }
 
+        _critic_subfolder = args.model_config.critic_subfolder if args.model_config.critic_subfolder is not None else "transformer"
         real_score_model = HeliosTransformer3DModel.from_pretrained(
             args.model_config.real_score_model_name_or_path,
-            subfolder=args.model_config.critic_subfolder or "transformer",
+            subfolder=_critic_subfolder,
             transformer_additional_kwargs=critic_transformer_additional_kwargs,
         )
         real_score_model = replace_rmsnorm_with_fp32(real_score_model)
@@ -658,12 +660,11 @@ def main(args):
                 else:
                     raise ValueError(f"unexpected save model: {model.__class__}")
         else:
+            _hook_sub = args.model_config.critic_subfolder if "critic" in input_dir else args.model_config.subfolder
+            _hook_sub = _hook_sub if _hook_sub is not None else "transformer"
             transformer_ = HeliosTransformer3DModel.from_pretrained(
                 args.model_config.transformer_model_name_or_path,
-                subfolder=(
-                    args.model_config.critic_subfolder if "critic" in input_dir else args.model_config.subfolder
-                )
-                or "transformer",
+                subfolder=_hook_sub,
                 transformer_additional_kwargs=critic_transformer_additional_kwargs
                 if "critic" in input_dir
                 else transformer_additional_kwargs,
@@ -2575,6 +2576,9 @@ def main(args):
                     main_print(f"[visualize] HTML generation failed: {e}")
 
     accelerator.end_training()
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 @torch.no_grad()

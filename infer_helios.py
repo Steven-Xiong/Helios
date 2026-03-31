@@ -158,9 +158,12 @@ def parse_args():
     )
 
     # === Action Conditioning ===
+    parser.add_argument("--max_samples", type=int, default=0, help="Max samples to run (0 = all)")
     parser.add_argument("--action_embeds_cache", type=str, default=None, help="Path to action_embeds_cache.pt")
     parser.add_argument("--action_keys", type=str, default=None, help="Keyboard action (e.g. W, W+A, None)")
     parser.add_argument("--action_mouse", type=str, default=None, help="Mouse action (e.g. →, ↑←, ·)")
+    parser.add_argument("--action_txt_path", type=str, default=None,
+                        help="Per-chunk action txt. Each line = one chunk, with (keys) and (mouse) in parentheses.")
 
     # === Context parallelism ===
     # Please refer to https://huggingface.co/docs/diffusers/v0.37.0/en/training/distributed_inference#context-parallelism
@@ -225,16 +228,27 @@ def read_prompt_table(path: str) -> pd.DataFrame:
     Supported input formats:
       CSV  columns: id, prompt, image_name, [action_class, action_keys, action_mouse, ...]
       TSV  columns: action_class, prompt, video_name, [action_keys, action_mouse, ...]
-    """
-    suffix = os.path.splitext(path)[1].lower()
-    if suffix in {".tsv", ".tab"}:
-        df = pd.read_csv(path, sep="\t")
-    elif suffix == ".csv":
-        df = pd.read_csv(path, sep=",")
-    else:
-        df = pd.read_csv(path, sep=None, engine="python")
+      Sekai CSV   : videoFile, caption, [cameraFile, location, scene, ...]
 
-    # TSV format uses video_name instead of id / image_name — normalize here
+    Multiple paths can be separated by commas to merge several CSV/TSV files.
+    """
+    paths = [p.strip() for p in path.split(",")]
+    frames = []
+    for p in paths:
+        suffix = os.path.splitext(p)[1].lower()
+        if suffix in {".tsv", ".tab"}:
+            frames.append(pd.read_csv(p, sep="\t"))
+        elif suffix == ".csv":
+            frames.append(pd.read_csv(p, sep=","))
+        else:
+            frames.append(pd.read_csv(p, sep=None, engine="python"))
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+    # Sekai CSV format: videoFile → video_name, caption → prompt
+    if "videoFile" in df.columns:
+        df = df.rename(columns={"videoFile": "video_name", "caption": "prompt"})
+
+    # TSV / Sekai format uses video_name instead of id / image_name — normalize here
     if "video_name" in df.columns and "id" not in df.columns:
         stems = df["video_name"].astype(str).map(
             lambda x: os.path.splitext(os.path.basename(x))[0]
@@ -426,14 +440,46 @@ def main():
         print(f"Loaded action embedding cache with {len(action_embeds_cache)} entries")
 
     # ── Prompt → (keys, mouse) parsing (mirrors YUME generate_per_sample_captions) ──
+    #
+    # Sekai captions use diverse phrasing ("advances steadily forward",
+    # "pans slightly to the right"), so we match a broader set of verbs and
+    # allow optional adverbs / prepositions between verb and direction.
+    _MOVE_VERBS = r"moves|advances|progresses|glides|proceeds"
+    _PAN_VERBS = r"pans|shifts|turns"
+    _TILT_VERBS = r"tilts|angles"
+    _ALL_VERBS = f"{_MOVE_VERBS}|{_PAN_VERBS}|{_TILT_VERBS}"
+    _ADVERBS = r"(?:\s+(?:steadily|smoothly|slightly|gently|gradually|subtly|then))?"
+    _PREPS = r"(?:\s+(?:to the|toward the|towards the))?"
+    _DIRS = r"forward|backward|upward|downward|left|right|up|down"
     _CLAUSE_PAT = re.compile(
-        r',?\s*the camera (moves|pans|tilts) (forward|backward|left|right|up|down)'
+        rf',?\s*the (?:camera|viewer)(?:\s+angle)?{_ADVERBS}\s+'
+        rf'({_ALL_VERBS}){_ADVERBS}{_PREPS}\s+'
+        rf'({_DIRS})',
+        re.IGNORECASE,
     )
+    _DIR_NORMALIZE = {"upward": "up", "downward": "down"}
     _MOVE_TO_KEY = {"forward": "W", "backward": "S", "left": "A", "right": "D"}
+    _PAN_VERBS_SET = {"pans", "shifts", "turns"}
+    _TILT_VERBS_SET = {"tilts", "angles"}
     _ROT_TO_MOUSE = {
-        "pans left": "←", "pans right": "→",
-        "tilts up": "↑", "tilts down": "↓",
+        "left": "←", "right": "→",
+        "up": "↑", "down": "↓",
     }
+
+    def _classify_verb(verb):
+        """Classify a camera verb into 'move' (translation) or 'rotate' (pan/tilt)."""
+        v = verb.lower()
+        if v in _PAN_VERBS_SET or v in _TILT_VERBS_SET:
+            return "rotate"
+        return "move"
+
+    def _verb_direction_to_action(verb, direction):
+        """Map (verb, direction) → (keys, mouse)."""
+        direction = _DIR_NORMALIZE.get(direction, direction)
+        if _classify_verb(verb) == "move":
+            return _MOVE_TO_KEY.get(direction, "None"), "·"
+        else:
+            return "None", _ROT_TO_MOUSE.get(direction, "·")
 
     def parse_prompt_to_chunk_actions(prompt_text, num_chunks):
         """Parse camera clauses from prompt into per-chunk (keys, mouse) pairs.
@@ -454,7 +500,7 @@ def main():
         prev_end = 0
         for m in matches:
             gap = prompt_text[prev_end:m.start()].strip(", ")
-            raw_clauses.append((gap, m.group(1), m.group(2)))
+            raw_clauses.append((gap, m.group(1), m.group(2).lower()))
             prev_end = m.end()
         trailing = prompt_text[prev_end:].strip(", .")
 
@@ -466,26 +512,21 @@ def main():
             if len(gap) >= MIN_ACTION_LEN:
                 segments.append(("None", "·"))
 
-            if verb == "moves":
-                keys = _MOVE_TO_KEY[direction]
-                mouse = "·"
-            else:
-                keys = "None"
-                mouse = _ROT_TO_MOUSE[f"{verb} {direction}"]
+            keys, mouse = _verb_direction_to_action(verb, direction)
 
             if i + 1 < len(raw_clauses):
                 next_gap, next_verb, next_dir = raw_clauses[i + 1]
                 can_merge = len(next_gap) < MIN_ACTION_LEN
                 if can_merge:
-                    is_move = verb == "moves"
-                    next_is_move = next_verb == "moves"
+                    is_move = _classify_verb(verb) == "move"
+                    next_is_move = _classify_verb(next_verb) == "move"
                     if is_move and not next_is_move:
-                        mouse = _ROT_TO_MOUSE[f"{next_verb} {next_dir}"]
+                        _, mouse = _verb_direction_to_action(next_verb, next_dir)
                         i += 2
                         segments.append((keys, mouse))
                         continue
                     elif not is_move and next_is_move:
-                        keys = _MOVE_TO_KEY[next_dir]
+                        keys, _ = _verb_direction_to_action(next_verb, next_dir)
                         i += 2
                         segments.append((keys, mouse))
                         continue
@@ -539,6 +580,59 @@ def main():
             return None
         embed = cache.get((ak, am), cache.get(("None", "·")))
         return [embed] * num_chunks
+
+    # ── Per-chunk action override from txt file ──
+    _PARENS_PAT = re.compile(r"\(([^)]*)\)")
+
+    def parse_action_txt(path: str):
+        """Parse a per-chunk action txt file.
+
+        Each line has two parenthesised tokens:
+          "... (W). ... (·). ..."  → ("W", "·")
+          "... (D). ... (→). ..."  → ("D", "→")
+        Returns list of (keys, mouse) tuples, one per line.
+        """
+        actions = []
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                tokens = _PARENS_PAT.findall(line)
+                if len(tokens) >= 2:
+                    actions.append((tokens[0], tokens[1]))
+                elif len(tokens) == 1:
+                    actions.append((tokens[0], "·"))
+                else:
+                    actions.append(("None", "·"))
+        return actions
+
+    def build_action_embeds_from_txt(txt_actions, num_chunks, cache):
+        """Build per-chunk action embeddings from parsed txt actions.
+
+        If txt has fewer lines than num_chunks, the last action is repeated.
+        If more, the list is truncated.
+        """
+        if cache is None or not txt_actions:
+            return None
+        if len(txt_actions) < num_chunks:
+            txt_actions = txt_actions + [txt_actions[-1]] * (num_chunks - len(txt_actions))
+        elif len(txt_actions) > num_chunks:
+            txt_actions = txt_actions[:num_chunks]
+        embeds = []
+        for keys, mouse in txt_actions:
+            embed = cache.get((keys, mouse), cache.get(("None", "·")))
+            embeds.append(embed)
+        return embeds
+
+    # Pre-parse action txt if provided
+    action_txt_actions = None
+    if args.action_txt_path is not None:
+        action_txt_actions = parse_action_txt(args.action_txt_path)
+        if rank == 0:
+            print(f"Loaded {len(action_txt_actions)} per-chunk actions from {args.action_txt_path}")
+            for i, (k, m) in enumerate(action_txt_actions):
+                print(f"  chunk {i}: keys={k}, mouse={m}")
 
     if args.prompt_txt_path is not None:
         with open(args.prompt_txt_path, "r") as f:
@@ -600,6 +694,8 @@ def main():
                 export_to_video(output, output_path, fps=24)
     elif args.image_prompt_csv_path is not None:
         df = read_prompt_table(args.image_prompt_csv_path)
+        if args.max_samples > 0:
+            df = df.head(args.max_samples)
         if not args.enable_parallelism:
             df = df.iloc[rank::world_size]
 
@@ -617,7 +713,11 @@ def main():
             )
 
             num_chunks = max(1, args.num_frames // 33)
-            if "action_keys" in df.columns and "action_mouse" in df.columns:
+            if action_txt_actions is not None:
+                row_action_embeds = build_action_embeds_from_txt(
+                    action_txt_actions, num_chunks, action_embeds_cache,
+                )
+            elif "action_keys" in df.columns and "action_mouse" in df.columns:
                 row_action_embeds = build_action_embeds_list_single(
                     str(row["action_keys"]), str(row["action_mouse"]),
                     num_chunks, action_embeds_cache,
@@ -627,8 +727,12 @@ def main():
                     prompt, num_chunks, action_embeds_cache,
                 )
             if rank == 0 and row_action_embeds:
-                parsed = parse_prompt_to_chunk_actions(prompt, num_chunks)
-                print(f"  [{row['id']}] chunks={num_chunks}, actions={parsed}")
+                if action_txt_actions is not None:
+                    used = action_txt_actions[:num_chunks]
+                    print(f"  [{row['id']}] chunks={num_chunks}, actions(txt)={used}")
+                else:
+                    parsed = parse_prompt_to_chunk_actions(prompt, num_chunks)
+                    print(f"  [{row['id']}] chunks={num_chunks}, actions={parsed}")
 
             with torch.no_grad():
                 try:
@@ -681,6 +785,8 @@ def main():
 
         df = df.sort_values(by=["id", "prompt_index"])
         all_video_ids = df["id"].unique()
+        if args.max_samples > 0:
+            all_video_ids = all_video_ids[:args.max_samples]
 
         if not args.enable_parallelism:
             my_video_ids = all_video_ids[rank::world_size]
@@ -702,8 +808,14 @@ def main():
                 prompt_list = group_df["prompt"].tolist()
             interpolate_time_list = [args.interpolate_time] * len(prompt_list)
 
-            # Build per-chunk action embeddings from CSV
-            csv_action_embeds = build_action_embeds_list_from_csv(group_df, action_embeds_cache)
+            # Build per-chunk action embeddings: txt override > CSV columns
+            num_chunks = max(1, args.num_frames // 33)
+            if action_txt_actions is not None:
+                csv_action_embeds = build_action_embeds_from_txt(
+                    action_txt_actions, num_chunks, action_embeds_cache,
+                )
+            else:
+                csv_action_embeds = build_action_embeds_list_from_csv(group_df, action_embeds_cache)
 
             with torch.no_grad():
                 try:
@@ -751,12 +863,18 @@ def main():
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
     else:
-        # Build action embeds for single action mode
-        single_action_embeds = build_action_embeds_list_single(
-            args.action_keys, args.action_mouse,
-            num_chunks=max(1, args.num_frames // 33),
-            cache=action_embeds_cache,
-        )
+        # Build action embeds: txt override > single action args
+        num_chunks = max(1, args.num_frames // 33)
+        if action_txt_actions is not None:
+            single_action_embeds = build_action_embeds_from_txt(
+                action_txt_actions, num_chunks, action_embeds_cache,
+            )
+        else:
+            single_action_embeds = build_action_embeds_list_single(
+                args.action_keys, args.action_mouse,
+                num_chunks=num_chunks,
+                cache=action_embeds_cache,
+            )
 
         with torch.no_grad():
             output = pipe(

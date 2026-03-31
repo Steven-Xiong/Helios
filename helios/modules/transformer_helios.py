@@ -1621,7 +1621,9 @@ class HeliosTransformer3DModel(
 
         if os.path.exists(pretrained_model_path):
             if subfolder is not None:
-                pretrained_model_path = os.path.join(pretrained_model_path, subfolder)
+                subfolder_path = os.path.join(pretrained_model_path, subfolder)
+                if os.path.isdir(subfolder_path):
+                    pretrained_model_path = subfolder_path
         else:
             print(f"Downloading from Hugging Face Hub: {pretrained_model_path}")
             cache_dir = snapshot_download(
