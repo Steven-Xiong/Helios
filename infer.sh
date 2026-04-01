@@ -19,9 +19,9 @@ LOCAL_MODELS="/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/BestWishYSH"
 # ============================================================
 # 4a. 推理 — Stage 1 (Helios-Base, 50 steps)
 # ============================================================
-# CKPT="ckpts/helios/stage1_action_20260322_020120/checkpoint-2500"
+# CKPT="ckpts/helios/20260330_205224/stage1_init"
 # TIMESTAMP_INFER=$(date +%Y%m%d_%H%M%S)
-# OUTPUT_DIR="./output_helios/eval_seadance2_stage1_${TIMESTAMP_INFER}"
+# OUTPUT_DIR="./output_helios/eval_seadance2_stage1_init_${TIMESTAMP_INFER}"
 
 # torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --base_model_path "$LOCAL_MODELS/Helios-Base" \
@@ -33,7 +33,7 @@ LOCAL_MODELS="/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/BestWishYSH"
 #     --lora_path "$CKPT" \
 #     --partial_path "$CKPT/transformer_partial.pth" \
 #     --output_folder "$OUTPUT_DIR" \
-#     --num_frames 321 \
+#     --num_frames 99 \
 #     --height 384 \
 #     --width 640 \
 #     --num_inference_steps 50 \
@@ -46,11 +46,11 @@ LOCAL_MODELS="/mnt/bn/voyager-sg-l3/zhexiao.xiong/Helios/BestWishYSH"
 #   Multiple CSVs can be comma-separated in --image_prompt_csv_path.
 #   First frames: extracted via extract_first_frames.py → data/yume_training/first_frame/
 # ============================================================
-CKPT_SEKAI="ckpts/helios/stage1_action_20260322_020120/checkpoint-2500"
+CKPT_SEKAI="ckpts/helios/20260330_205224/stage1_init/checkpoint-2000-final"
 TIMESTAMP_SEKAI=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_SEKAI="./output_helios/eval_yume_training_stage1_${TIMESTAMP_SEKAI}"
+OUTPUT_DIR_SEKAI="./output_helios/eval_sekai_training_stage1_init_${TIMESTAMP_SEKAI}"
 
-torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
+torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
     --base_model_path "$LOCAL_MODELS/Helios-Base" \
     --transformer_path "$LOCAL_MODELS/Helios-Base" \
     --sample_type i2v \
@@ -60,7 +60,7 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
     --lora_path "$CKPT_SEKAI" \
     --partial_path "$CKPT_SEKAI/transformer_partial.pth" \
     --output_folder "$OUTPUT_DIR_SEKAI" \
-    --num_frames 321 \
+    --num_frames 99 \
     --height 384 \
     --width 640 \
     --num_inference_steps 50 \
@@ -85,7 +85,7 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --lora_path "$CKPT_S2" \
 #     --partial_path "$CKPT_S2/transformer_partial.pth" \
 #     --output_folder "$OUTPUT_DIR_S2" \
-#     --num_frames 321 \
+#     --num_frames 99 \
 #     --height 384 \
 #     --width 640 \
 #     --guidance_scale 5.0 \
@@ -112,7 +112,7 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --lora_path "$CKPT_S2_SEKAI" \
 #     --partial_path "$CKPT_S2_SEKAI/transformer_partial.pth" \
 #     --output_folder "$OUTPUT_DIR_S2_SEKAI" \
-#     --num_frames 321 \
+#     --num_frames 99 \
 #     --height 384 \
 #     --width 640 \
 #     --guidance_scale 5.0 \
@@ -140,7 +140,7 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --lora_path "$CKPT_S3" \
 #     --partial_path "$CKPT_S3/transformer_partial.pth" \
 #     --output_folder "$OUTPUT_DIR_S3" \
-#     --num_frames 321 \
+#     --num_frames 264 \
 #     --height 384 \
 #     --width 640 \
 #     --guidance_scale 1.0 \
@@ -166,7 +166,7 @@ torchrun --nproc_per_node 8 --master_port 9605 infer_helios.py \
 #     --lora_path "$CKPT_S3_SEKAI" \
 #     --partial_path "$CKPT_S3_SEKAI/transformer_partial.pth" \
 #     --output_folder "$OUTPUT_DIR_S3_SEKAI" \
-#     --num_frames 321 \
+#     --num_frames 264 \
 #     --height 384 \
 #     --width 640 \
 #     --guidance_scale 1.0 \

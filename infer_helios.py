@@ -8,6 +8,7 @@ os.environ["HF_ENABLE_PARALLEL_LOADING"] = "yes"
 os.environ["HF_PARALLEL_LOADING_WORKERS"] = "8"
 
 import argparse
+import json
 import time
 
 import pandas as pd
@@ -634,6 +635,9 @@ def main():
             for i, (k, m) in enumerate(action_txt_actions):
                 print(f"  chunk {i}: keys={k}, mouse={m}")
 
+    # Per-sample chunk actions log, saved to JSON for HTML visualization
+    chunk_actions_log = {}
+
     if args.prompt_txt_path is not None:
         with open(args.prompt_txt_path, "r") as f:
             prompt_list = [line.strip() for line in f.readlines() if line.strip()]
@@ -696,6 +700,21 @@ def main():
         df = read_prompt_table(args.image_prompt_csv_path)
         if args.max_samples > 0:
             df = df.head(args.max_samples)
+
+        # Resolve chunk actions for ALL samples before sharding (CPU-only, cheap)
+        num_chunks = max(1, args.num_frames // 33)
+        for _, r in df.iterrows():
+            p = r.get("refined_prompt") or r["prompt"]
+            if action_txt_actions is not None:
+                ra = action_txt_actions[:num_chunks]
+                if len(ra) < num_chunks:
+                    ra = ra + [ra[-1]] * (num_chunks - len(ra))
+            elif "action_keys" in df.columns and "action_mouse" in df.columns:
+                ra = [(str(r["action_keys"]), str(r["action_mouse"]))] * num_chunks
+            else:
+                ra = parse_prompt_to_chunk_actions(p, num_chunks)
+            chunk_actions_log[str(r["id"])] = [list(a) for a in ra]
+
         if not args.enable_parallelism:
             df = df.iloc[rank::world_size]
 
@@ -712,7 +731,6 @@ def main():
                 else None
             )
 
-            num_chunks = max(1, args.num_frames // 33)
             if action_txt_actions is not None:
                 row_action_embeds = build_action_embeds_from_txt(
                     action_txt_actions, num_chunks, action_embeds_cache,
@@ -726,13 +744,9 @@ def main():
                 row_action_embeds = build_action_embeds_from_prompt(
                     prompt, num_chunks, action_embeds_cache,
                 )
-            if rank == 0 and row_action_embeds:
-                if action_txt_actions is not None:
-                    used = action_txt_actions[:num_chunks]
-                    print(f"  [{row['id']}] chunks={num_chunks}, actions(txt)={used}")
-                else:
-                    parsed = parse_prompt_to_chunk_actions(prompt, num_chunks)
-                    print(f"  [{row['id']}] chunks={num_chunks}, actions={parsed}")
+
+            if rank == 0:
+                print(f"  [{row['id']}] chunks={num_chunks}, actions={chunk_actions_log.get(str(row['id']))}")
 
             with torch.no_grad():
                 try:
@@ -788,6 +802,20 @@ def main():
         if args.max_samples > 0:
             all_video_ids = all_video_ids[:args.max_samples]
 
+        # Resolve chunk actions for ALL videos before sharding (CPU-only, cheap)
+        num_chunks = max(1, args.num_frames // 33)
+        for vid in all_video_ids:
+            group = df[df["id"] == vid]
+            if action_txt_actions is not None:
+                ra = action_txt_actions[:num_chunks]
+                if len(ra) < num_chunks:
+                    ra = ra + [ra[-1]] * (num_chunks - len(ra))
+            elif "action_keys" in group.columns and "action_mouse" in group.columns:
+                ra = [(str(r["action_keys"]), str(r["action_mouse"])) for _, r in group.iterrows()]
+            else:
+                ra = [("None", "·")] * num_chunks
+            chunk_actions_log[str(vid)] = [list(a) for a in ra]
+
         if not args.enable_parallelism:
             my_video_ids = all_video_ids[rank::world_size]
         else:
@@ -808,8 +836,7 @@ def main():
                 prompt_list = group_df["prompt"].tolist()
             interpolate_time_list = [args.interpolate_time] * len(prompt_list)
 
-            # Build per-chunk action embeddings: txt override > CSV columns
-            num_chunks = max(1, args.num_frames // 33)
+            # Build action embeddings for inference
             if action_txt_actions is not None:
                 csv_action_embeds = build_action_embeds_from_txt(
                     action_txt_actions, num_chunks, action_embeds_cache,
@@ -928,7 +955,14 @@ def main():
 
     print(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.3f} GB")
 
-    # ── Generate HTML visualization (rank 0 only) ──
+    # ── Save chunk actions log & generate HTML (rank 0 only) ──
+    chunk_actions_path = None
+    if rank == 0 and chunk_actions_log:
+        chunk_actions_path = os.path.join(args.output_folder, "chunk_actions.json")
+        with open(chunk_actions_path, "w") as f:
+            json.dump(chunk_actions_log, f, ensure_ascii=False, indent=1)
+        print(f"Saved chunk actions for {len(chunk_actions_log)} samples → {chunk_actions_path}")
+
     if rank == 0 and args.image_prompt_csv_path is not None:
         from visualize_results import build_eval_html
 
@@ -940,6 +974,7 @@ def main():
             label_path=args.image_prompt_csv_path,
             first_frame_dir=args.base_image_prompt_path,
             output_path=html_path,
+            chunk_actions_path=chunk_actions_path,
         )
     elif rank == 0 and args.interactive_prompt_csv_path is not None:
         from visualize_results import build_eval_html
@@ -952,6 +987,7 @@ def main():
             label_path=args.interactive_prompt_csv_path,
             first_frame_dir=None,
             output_path=html_path,
+            chunk_actions_path=chunk_actions_path,
         )
 
 

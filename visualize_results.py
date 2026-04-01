@@ -32,6 +32,7 @@ Videos and images are base64-encoded so the HTML is fully self-contained (works 
 
 import argparse
 import base64
+import json
 import os
 import re
 
@@ -64,6 +65,11 @@ HTML_HEADER = """\
     .sample-id {{ font-weight: 700; font-size: 14px; color: #7cb3ff; margin-bottom: 6px; }}
     .action-class {{ display: inline-block; background: #2a3a50; color: #8ec8ff; font-size: 11px; padding: 2px 8px; border-radius: 3px; margin-bottom: 6px; }}
     .prompt {{ font-size: 13px; line-height: 1.5; color: #ccc; }}
+    .chunk-actions {{ margin-top: 8px; font-size: 12px; line-height: 1.8; }}
+    .chunk-actions summary {{ cursor: pointer; color: #8ec8ff; font-size: 12px; }}
+    .chunk {{ display: inline-block; background: #1e2a36; border-radius: 3px; padding: 1px 6px; margin: 2px 2px; font-family: monospace; font-size: 11px; }}
+    .chunk .key {{ color: #ffcc66; }}
+    .chunk .mouse {{ color: #88ddaa; }}
     .video-cell video {{ max-width: 480px; border-radius: 4px; }}
     .fname {{ font-size: 11px; color: #666; margin-top: 4px; }}
     .na {{ color: #555; }}
@@ -85,36 +91,66 @@ HTML_FOOTER = """\
 # ─── Eval mode ───────────────────────────────────────────────────────────────
 
 def _load_label_file(label_path: str) -> list[dict]:
-    """Load CSV or TSV label file and normalize to list of dicts with keys:
+    """Load CSV or TSV label file(s) and normalize to list of dicts with keys:
     sample_id, prompt, action_class, image_name (may be empty string).
 
-    CSV format (test_eval.csv):   id, prompt, image_name, action_class
-    TSV format (*.tsv):           action_class, prompt, video_name
+    Supported formats (auto-detected):
+      TSV:       action_class, prompt, video_name, [action_keys, action_mouse, ...]
+      CSV:       id, prompt, image_name, [action_class, ...]
+      Sekai CSV: videoFile, caption, [cameraFile, location, scene, ...]
+
+    Multiple paths can be comma-separated (same as --image_prompt_csv_path in infer_helios.py).
     """
-    ext = os.path.splitext(label_path)[1].lower()
-    if ext == ".tsv":
-        df = pd.read_csv(label_path, sep="\t")
-        records = []
-        for _, row in df.iterrows():
-            video_name = str(row["video_name"])
-            stem = os.path.splitext(video_name)[0]
-            records.append({
-                "sample_id": stem,
-                "prompt": str(row.get("refined_prompt") or row["prompt"]),
-                "action_class": str(row.get("action_class", "")),
-                "image_name": stem + ".jpg",  # first_frame uses same stem
-            })
-    else:
-        df = pd.read_csv(label_path)
-        records = []
-        for _, row in df.iterrows():
-            records.append({
-                "sample_id": str(row["id"]),
-                "prompt": str(row.get("refined_prompt") or row["prompt"]),
-                "action_class": str(row.get("action_class", "")),
-                "image_name": str(row.get("image_name", "")),
-            })
+    paths = [p.strip() for p in label_path.split(",")]
+    frames = []
+    for p in paths:
+        ext = os.path.splitext(p)[1].lower()
+        if ext in {".tsv", ".tab"}:
+            frames.append(pd.read_csv(p, sep="\t"))
+        elif ext == ".csv":
+            frames.append(pd.read_csv(p, sep=","))
+        else:
+            frames.append(pd.read_csv(p, sep=None, engine="python"))
+    df = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+
+    # Sekai CSV: videoFile → video_name, caption → prompt
+    if "videoFile" in df.columns:
+        df = df.rename(columns={"videoFile": "video_name", "caption": "prompt"})
+
+    # TSV / Sekai: video_name → id / image_name
+    if "video_name" in df.columns and "id" not in df.columns:
+        stems = df["video_name"].astype(str).map(
+            lambda x: os.path.splitext(os.path.basename(x))[0]
+        )
+        df = df.copy()
+        df["id"] = stems
+        if "image_name" not in df.columns:
+            df["image_name"] = stems + ".jpg"
+
+    if "image_name" not in df.columns:
+        df["image_name"] = ""
+
+    records = []
+    for _, row in df.iterrows():
+        records.append({
+            "sample_id": str(row["id"]),
+            "prompt": str(row.get("refined_prompt") or row["prompt"]),
+            "action_class": str(row.get("action_class", row.get("scene", ""))),
+            "image_name": str(row.get("image_name", "")),
+        })
     return records
+
+
+def _render_chunk_actions_html(actions: list[list[str]]) -> str:
+    """Render per-chunk [keys, mouse] pairs as styled inline badges."""
+    parts = []
+    for i, (keys, mouse) in enumerate(actions):
+        parts.append(
+            f'<span class="chunk">{i}: '
+            f'<span class="key">{keys}</span> '
+            f'<span class="mouse">{mouse}</span></span>'
+        )
+    return "".join(parts)
 
 
 def build_eval_html(
@@ -122,8 +158,14 @@ def build_eval_html(
     label_path: str,
     first_frame_dir: str | None,
     output_path: str,
+    chunk_actions_path: str | None = None,
 ):
     records = _load_label_file(label_path)
+
+    chunk_actions_map: dict[str, list] = {}
+    if chunk_actions_path and os.path.isfile(chunk_actions_path):
+        with open(chunk_actions_path, "r") as f:
+            chunk_actions_map = json.load(f)
 
     rows_html = []
     for rec in records:
@@ -154,6 +196,15 @@ def build_eval_html(
         )
         escaped_prompt = prompt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+        chunk_html = ""
+        if sample_id in chunk_actions_map:
+            badges = _render_chunk_actions_html(chunk_actions_map[sample_id])
+            chunk_html = (
+                f'<div class="chunk-actions">'
+                f'<details><summary>Chunk Actions ({len(chunk_actions_map[sample_id])} chunks)</summary>'
+                f'{badges}</details></div>'
+            )
+
         rows_html.append(f"""
         <tr>
             <td class="img-cell">
@@ -163,6 +214,7 @@ def build_eval_html(
                 <div class="sample-id">{sample_id}</div>
                 {action_badge}
                 <div class="prompt">{escaped_prompt}</div>
+                {chunk_html}
             </td>
             <td class="video-cell">
                 <video controls preload="metadata">
@@ -311,8 +363,10 @@ def scan_all_and_build(
             if label_path is None:
                 print(f"[visualize] skip eval dir (no --label_path): {name}")
                 continue
+            ca_path = os.path.join(d, "chunk_actions.json")
             try:
-                build_eval_html(d, label_path, first_frame_dir, html_path)
+                build_eval_html(d, label_path, first_frame_dir, html_path,
+                                chunk_actions_path=ca_path if os.path.isfile(ca_path) else None)
                 total += 1
             except Exception as e:
                 print(f"[visualize] FAILED {name}: {e}")
@@ -341,6 +395,7 @@ if __name__ == "__main__":
         help="[eval/scan_all] CSV or TSV with sample labels (auto-detected by extension)",
     )
     parser.add_argument("--first_frame_dir", default=None, help="[eval/scan_all] Directory with first-frame images")
+    parser.add_argument("--chunk_actions", default=None, help="[eval] chunk_actions.json path (auto-detected in video_dir if omitted)")
     parser.add_argument("--output", default=None, help="[eval/validation] Output HTML path")
     args = parser.parse_args()
 
@@ -350,7 +405,13 @@ if __name__ == "__main__":
         if args.label_path is None:
             parser.error("--label_path is required for eval mode")
         output = args.output or os.path.join(args.video_dir, "html", "results.html")
-        build_eval_html(args.video_dir, args.label_path, args.first_frame_dir, output)
+        ca_path = args.chunk_actions
+        if ca_path is None:
+            auto = os.path.join(args.video_dir, "chunk_actions.json")
+            if os.path.isfile(auto):
+                ca_path = auto
+        build_eval_html(args.video_dir, args.label_path, args.first_frame_dir, output,
+                        chunk_actions_path=ca_path)
 
     elif args.mode == "validation":
         if args.video_dir is None:
