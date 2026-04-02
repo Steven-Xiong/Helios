@@ -73,6 +73,9 @@ validation_config:
     - 9
   num_validation_videos: 1
   num_inference_steps: 50
+  # ---- Dynamic Shifting ----
+  use_dynamic_shifting: true
+  time_shift_type: "exponential"  # ["exponential", "linear"]
 
 
 training_config:

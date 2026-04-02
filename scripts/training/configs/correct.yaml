@@ -1,11 +1,11 @@
-training_config:
+validation_config:
   # ------------------------------------------------------------------------------------------------------------------------------------
-  # ------- During inference, we found that enabling use_dynamic_shifting with time_shift_type="exponential" yields better
-  # ------- results. However, during training, we either failed to enable it properly or set time_shift_type to "linear".
+  # ------- During validation/inference, enabling use_dynamic_shifting" yields better results.
   use_dynamic_shifting: true
-  time_shift_type: "exponential"
+  time_shift_type: "exponential"   # ["exponential", "linear"]
   # ------------------------------------------------------------------------------------------------------------------------------------
-  # 
+
+training_config:
   # ------------------------------------------------------------------------------------------------------------------------------------
   # ------- Regarding the issue that I2V tends to produce very slow motion at the beginning:
   # ------- During training, we did not construct the corresponding history context format (i.e., first-frame anchor + last-frame), 

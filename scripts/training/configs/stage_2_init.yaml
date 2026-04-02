@@ -72,6 +72,9 @@ validation_config:
   validation_latent_window_size:
     - 9
   num_validation_videos: 1
+  # ---- Dynamic Shifting ----
+  use_dynamic_shifting: true
+  time_shift_type: "exponential"  # ["exponential", "linear"]
   # ---- Stage 2 ----
   stage2_simulated_inference_steps:
     - 20

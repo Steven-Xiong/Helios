@@ -75,6 +75,9 @@ validation_config:
     - 9
   num_validation_videos: 1
   num_inference_steps: 6
+  # ---- Dynamic Shifting ----
+  use_dynamic_shifting: true
+  time_shift_type: "linear"  # ["exponential", "linear"]
   # ---- Pyramid ----
   stage2_simulated_inference_steps:
     - 2

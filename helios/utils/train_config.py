@@ -103,6 +103,12 @@ class ValidationConfig:
     val_output_dir: Optional[str] = field(default=None)
     num_validation_videos: int = field(default=1)
     num_inference_steps: int = field(default=30)
+    # ---- Dynamic Shifting ----
+    use_dynamic_shifting: bool = field(default=False)
+    time_shift_type: str = field(
+        default="linear",
+        metadata={"choices": ["exponential", "linear"]},
+    )
     # ---- Stage 1 ----
     use_kv_cache: bool = field(default=False)
     # ---- Stage 2 ----

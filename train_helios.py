@@ -2289,11 +2289,12 @@ def main(args):
                                     "image": _vs["image"],
                                     "image_noise_sigma_min": 0.111,
                                     "image_noise_sigma_max": 0.135,
+                                    # ---- Dynamic Shifting ----
+                                    "use_dynamic_shifting": args.validation_config.use_dynamic_shifting,
+                                    "time_shift_type": args.validation_config.time_shift_type,
                                     # For Stage 1
                                     "history_sizes": args.training_config.history_sizes,
                                     "latent_window_size": args.validation_config.validation_latent_window_size[0],
-                                    "use_dynamic_shifting": args.training_config.use_dynamic_shifting,
-                                    "time_shift_type": args.training_config.time_shift_type,
                                     "is_keep_x0": True,
                                     "use_kv_cache": args.validation_config.use_kv_cache,
                                     # For Stage 2
@@ -2523,11 +2524,12 @@ def main(args):
                         "height": args.validation_config.validation_height,
                         "width": args.validation_config.validation_width,
                         "num_inference_steps": args.validation_config.num_inference_steps,
+                        # ---- Dynamic Shifting ----
+                        "use_dynamic_shifting": args.validation_config.use_dynamic_shifting,
+                        "time_shift_type": args.validation_config.time_shift_type,
                         # For Stage 1
                         "history_sizes": args.training_config.history_sizes,
                         "latent_window_size": args.validation_config.validation_latent_window_size[0],
-                        "use_dynamic_shifting": args.training_config.use_dynamic_shifting,
-                        "time_shift_type": args.training_config.time_shift_type,
                         "is_keep_x0": True,
                         "use_kv_cache": args.validation_config.use_kv_cache,
                         # For Stage 2
