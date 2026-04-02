@@ -130,7 +130,7 @@ training_config:
   is_random_drop: true
   random_drop_i2v_ratio: 0.4
   random_drop_v2v_ratio: 0.4
-  random_drop_t2v_ratio: 0.3
+  random_drop_t2v_ratio: 0.0
   is_amplify_history: false
   history_scale_mode: "per_head"
   is_train_full_patch_embedding: false

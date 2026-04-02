@@ -247,7 +247,10 @@ def read_prompt_table(path: str) -> pd.DataFrame:
 
     # Sekai CSV format: videoFile → video_name, caption → prompt
     if "videoFile" in df.columns:
-        df = df.rename(columns={"videoFile": "video_name", "caption": "prompt"})
+        rename_map = {"videoFile": "video_name", "caption": "prompt"}
+        if "caption_original" in df.columns:
+            rename_map["caption_original"] = "prompt_original"
+        df = df.rename(columns=rename_map)
 
     # TSV / Sekai format uses video_name instead of id / image_name — normalize here
     if "video_name" in df.columns and "id" not in df.columns:
@@ -318,9 +321,12 @@ def main():
         video_path = args.video_path
         prompt = args.prompt
 
+    # Auto-detect whether transformer weights are in a "transformer/" subfolder or
+    # directly at transformer_path (e.g. merged_transformer dirs that are already flat).
+    _has_subfolder = os.path.isdir(os.path.join(args.transformer_path, "transformer"))
     transformer = HeliosTransformer3DModel.from_pretrained(
         args.transformer_path,
-        subfolder="transformer",
+        subfolder="transformer" if _has_subfolder else None,
         torch_dtype=args.weight_dtype,
     )
     if not args.enable_compile:
@@ -443,25 +449,63 @@ def main():
     # ── Prompt → (keys, mouse) parsing (mirrors YUME generate_per_sample_captions) ──
     #
     # Sekai captions use diverse phrasing ("advances steadily forward",
-    # "pans slightly to the right"), so we match a broader set of verbs and
-    # allow optional adverbs / prepositions between verb and direction.
-    _MOVE_VERBS = r"moves|advances|progresses|glides|proceeds"
-    _PAN_VERBS = r"pans|shifts|turns"
+    # "pans slightly to the right", "the drone glides forward",
+    # "continues to move forward", "pans from left to right"), so we use
+    # multiple complementary patterns to maximise coverage.
+    _MOVE_VERBS = r"moves|advances|progresses|glides|proceeds|pushes|follows|tracks|navigates"
+    _PAN_VERBS = r"pans|shifts|turns|sweeps|rotates"
     _TILT_VERBS = r"tilts|angles"
     _ALL_VERBS = f"{_MOVE_VERBS}|{_PAN_VERBS}|{_TILT_VERBS}"
-    _ADVERBS = r"(?:\s+(?:steadily|smoothly|slightly|gently|gradually|subtly|then))?"
+    _ADVERBS = r"(?:\s+(?:steadily|smoothly|slightly|gently|gradually|subtly|then|occasionally|slowly|briefly|further|continuously|rapidly|quickly))*"
     _PREPS = r"(?:\s+(?:to the|toward the|towards the))?"
     _DIRS = r"forward|backward|upward|downward|left|right|up|down"
+    _SUBJECT = r"the (?:camera|viewer(?:'s (?:perspective|gaze|view))?|drone)(?:\s+angle)?"
+
     _CLAUSE_PAT = re.compile(
-        rf',?\s*the (?:camera|viewer)(?:\s+angle)?{_ADVERBS}\s+'
+        rf',?\s*{_SUBJECT}{_ADVERBS}\s+'
         rf'({_ALL_VERBS}){_ADVERBS}{_PREPS}\s+'
         rf'({_DIRS})',
         re.IGNORECASE,
     )
+
+    # "continues to move/pan/tilt forward" or "continues moving forward"
+    _CONTINUES_PAT = re.compile(
+        rf',?\s*{_SUBJECT}{_ADVERBS}\s+'
+        rf'continues{_ADVERBS}\s+(?:'
+        rf'(?:to\s+)?(?:move|pan|tilt|advance|progress|glide|shift|push|turn|track|navigate)'
+        rf'|moving|panning|tilting|advancing|progressing|gliding|shifting|pushing|turning'
+        rf'){_ADVERBS}{_PREPS}\s+({_DIRS})',
+        re.IGNORECASE,
+    )
+
+    # "continues its [steady] forward journey" / "continues its upward climb"
+    _CONTINUES_ITS_PAT = re.compile(
+        rf',?\s*{_SUBJECT}{_ADVERBS}\s+'
+        rf'continues\s+(?:its|the)\s+(?:steady\s+|smooth\s+)?({_DIRS})',
+        re.IGNORECASE,
+    )
+
+    # "pans smoothly from left to right"
+    _FROM_TO_PAT = re.compile(
+        rf',?\s*{_SUBJECT}{_ADVERBS}\s+'
+        rf'(?:{_ALL_VERBS}){_ADVERBS}\s+'
+        rf'from\s+(?:the\s+)?({_DIRS})\s+to\s+(?:the\s+)?({_DIRS})',
+        re.IGNORECASE,
+    )
+
+    # "the camera/viewer moving forward" (gerund without finite verb)
+    _GERUND_PAT = re.compile(
+        rf',?\s*{_SUBJECT}{_ADVERBS}\s+'
+        rf'(moving|panning|tilting|advancing|progressing|gliding|shifting|pushing|turning)'
+        rf'{_ADVERBS}{_PREPS}\s+({_DIRS})',
+        re.IGNORECASE,
+    )
+
     _DIR_NORMALIZE = {"upward": "up", "downward": "down"}
     _MOVE_TO_KEY = {"forward": "W", "backward": "S", "left": "A", "right": "D"}
-    _PAN_VERBS_SET = {"pans", "shifts", "turns"}
-    _TILT_VERBS_SET = {"tilts", "angles"}
+    _PAN_VERBS_SET = {"pans", "shifts", "turns", "sweeps", "rotates",
+                      "panning", "shifting", "turning"}
+    _TILT_VERBS_SET = {"tilts", "angles", "tilting"}
     _ROT_TO_MOUSE = {
         "left": "←", "right": "→",
         "up": "↑", "down": "↓",
@@ -482,64 +526,122 @@ def main():
         else:
             return "None", _ROT_TO_MOUSE.get(direction, "·")
 
+    def _collect_all_clause_matches(prompt_text):
+        """Gather directional clause matches from all patterns, deduplicated.
+
+        Each result carries .start, .end, .verb, .direction, and .text (the
+        matched substring from the original prompt).
+        """
+        Match = type("Match", (), {})
+
+        results = []
+        for m in _CLAUSE_PAT.finditer(prompt_text):
+            o = Match()
+            o.start, o.end = m.start(), m.end()
+            o.verb, o.direction = m.group(1).lower(), m.group(2).lower()
+            o.text = prompt_text[m.start():m.end()].strip(", ")
+            results.append(o)
+
+        def _overlaps(new_start, new_end):
+            return any(r.start <= new_start < r.end for r in results)
+
+        for m in _CONTINUES_PAT.finditer(prompt_text):
+            if not _overlaps(m.start(), m.end()):
+                o = Match()
+                o.start, o.end = m.start(), m.end()
+                o.verb, o.direction = "moves", m.group(1).lower()
+                o.text = prompt_text[m.start():m.end()].strip(", ")
+                results.append(o)
+
+        for m in _CONTINUES_ITS_PAT.finditer(prompt_text):
+            if not _overlaps(m.start(), m.end()):
+                o = Match()
+                o.start, o.end = m.start(), m.end()
+                o.verb, o.direction = "moves", m.group(1).lower()
+                o.text = prompt_text[m.start():m.end()].strip(", ")
+                results.append(o)
+
+        for m in _FROM_TO_PAT.finditer(prompt_text):
+            if not _overlaps(m.start(), m.end()):
+                o = Match()
+                o.start, o.end = m.start(), m.end()
+                o.verb, o.direction = "pans", m.group(2).lower()
+                o.text = prompt_text[m.start():m.end()].strip(", ")
+                results.append(o)
+
+        for m in _GERUND_PAT.finditer(prompt_text):
+            if not _overlaps(m.start(), m.end()):
+                o = Match()
+                o.start, o.end = m.start(), m.end()
+                gerund = m.group(1).lower()
+                o.verb = gerund.rstrip("ing") + "s" if gerund not in _PAN_VERBS_SET and gerund not in _TILT_VERBS_SET else gerund
+                o.direction = m.group(2).lower()
+                o.text = prompt_text[m.start():m.end()].strip(", ")
+                results.append(o)
+
+        results.sort(key=lambda r: r.start)
+        return results
+
     def parse_prompt_to_chunk_actions(prompt_text, num_chunks):
-        """Parse camera clauses from prompt into per-chunk (keys, mouse) pairs.
+        """Parse camera clauses from prompt into per-chunk (keys, mouse, clause) triples.
 
         Adjacent move+rotation clauses (no significant text between them) are
         merged into a single combined action, e.g. "the camera moves forward,
-        the camera pans left" → ("W", "←") instead of two separate chunks.
-        Non-camera text gaps (>=20 chars) become ("None", "·") segments.
+        the camera pans left" → ("W", "←", "...") instead of two separate chunks.
+        Non-camera text gaps (>=20 chars) become ("None", "·", "") segments.
         Segments are distributed evenly across num_chunks.
         """
-        matches = list(_CLAUSE_PAT.finditer(prompt_text))
+        matches = _collect_all_clause_matches(prompt_text)
         if not matches:
-            return [("None", "·")] * num_chunks
+            return [("None", "·", "")] * num_chunks
 
         MIN_ACTION_LEN = 20
 
         raw_clauses = []
         prev_end = 0
         for m in matches:
-            gap = prompt_text[prev_end:m.start()].strip(", ")
-            raw_clauses.append((gap, m.group(1), m.group(2).lower()))
-            prev_end = m.end()
+            gap = prompt_text[prev_end:m.start].strip(", ")
+            raw_clauses.append((gap, m.verb, m.direction, m.text))
+            prev_end = m.end
         trailing = prompt_text[prev_end:].strip(", .")
 
         segments = []
         i = 0
         while i < len(raw_clauses):
-            gap, verb, direction = raw_clauses[i]
+            gap, verb, direction, clause_text = raw_clauses[i]
 
             if len(gap) >= MIN_ACTION_LEN:
-                segments.append(("None", "·"))
+                segments.append(("None", "·", ""))
 
             keys, mouse = _verb_direction_to_action(verb, direction)
 
             if i + 1 < len(raw_clauses):
-                next_gap, next_verb, next_dir = raw_clauses[i + 1]
+                next_gap, next_verb, next_dir, next_clause = raw_clauses[i + 1]
                 can_merge = len(next_gap) < MIN_ACTION_LEN
                 if can_merge:
                     is_move = _classify_verb(verb) == "move"
                     next_is_move = _classify_verb(next_verb) == "move"
                     if is_move and not next_is_move:
                         _, mouse = _verb_direction_to_action(next_verb, next_dir)
+                        merged_text = f"{clause_text} + {next_clause}"
                         i += 2
-                        segments.append((keys, mouse))
+                        segments.append((keys, mouse, merged_text))
                         continue
                     elif not is_move and next_is_move:
                         keys, _ = _verb_direction_to_action(next_verb, next_dir)
+                        merged_text = f"{clause_text} + {next_clause}"
                         i += 2
-                        segments.append((keys, mouse))
+                        segments.append((keys, mouse, merged_text))
                         continue
 
-            segments.append((keys, mouse))
+            segments.append((keys, mouse, clause_text))
             i += 1
 
         if len(trailing) >= MIN_ACTION_LEN:
-            segments.append(("None", "·"))
+            segments.append(("None", "·", ""))
 
         if not segments:
-            return [("None", "·")] * num_chunks
+            return [("None", "·", "")] * num_chunks
 
         n = len(segments)
         base = num_chunks // n
@@ -549,38 +651,6 @@ def main():
             steps = base + (1 if i < remainder else 0)
             actions.extend([seg] * steps)
         return actions
-
-    def build_action_embeds_from_prompt(prompt_text, num_chunks, cache):
-        """Parse prompt camera clauses → per-chunk action embeddings."""
-        if cache is None:
-            return None
-        chunk_actions = parse_prompt_to_chunk_actions(prompt_text, num_chunks)
-        embeds = []
-        for keys, mouse in chunk_actions:
-            embed = cache.get((keys, mouse), cache.get(("None", "·")))
-            embeds.append(embed)
-        return embeds
-
-    def build_action_embeds_list_from_csv(group_df, cache):
-        """Build per-chunk action embeddings from CSV columns."""
-        if cache is None:
-            return None
-        if "action_keys" not in group_df.columns or "action_mouse" not in group_df.columns:
-            return None
-        embeds = []
-        for _, row in group_df.iterrows():
-            ak = row.get("action_keys", "None")
-            am = row.get("action_mouse", "·")
-            embed = cache.get((ak, am), cache.get(("None", "·")))
-            embeds.append(embed)
-        return embeds
-
-    def build_action_embeds_list_single(ak, am, num_chunks, cache):
-        """Build action embeddings for a single repeated action."""
-        if cache is None or ak is None or am is None:
-            return None
-        embed = cache.get((ak, am), cache.get(("None", "·")))
-        return [embed] * num_chunks
 
     # ── Per-chunk action override from txt file ──
     _PARENS_PAT = re.compile(r"\(([^)]*)\)")
@@ -608,23 +678,64 @@ def main():
                     actions.append(("None", "·"))
         return actions
 
-    def build_action_embeds_from_txt(txt_actions, num_chunks, cache):
-        """Build per-chunk action embeddings from parsed txt actions.
+    # ── Unified action resolution ──
 
-        If txt has fewer lines than num_chunks, the last action is repeated.
-        If more, the list is truncated.
+    def _pad_or_truncate(actions, num_chunks):
+        """Pad (repeat last) or truncate an action list to exactly num_chunks."""
+        if len(actions) < num_chunks:
+            return actions + [actions[-1]] * (num_chunks - len(actions))
+        return actions[:num_chunks]
+
+    def _parse_chunk_actions_json(raw):
+        """Parse a chunk_actions_json string → list of (keys, mouse) tuples."""
+        import json as _json
+        parsed = _json.loads(raw)
+        return [(str(c[0] if isinstance(c, (list, tuple)) else c.get("keys", "None")),
+                 str(c[1] if isinstance(c, (list, tuple)) else c.get("mouse", "·")))
+                for c in parsed]
+
+    def resolve_row_actions(row, df, num_chunks, action_txt_actions):
+        """Resolve per-chunk (keys, mouse) actions for a single CSV row.
+
+        Returns (actions, source) where:
+          - actions: list of exactly num_chunks (keys, mouse) tuples
+          - source: str label indicating which priority was used
+
+        Resolution order:
+          1. chunk_actions_json column  — GT per-chunk actions exported from PT files
+          2. --action_txt_path          — fixed sequence shared across all videos
+          3. action_keys/action_mouse   — single action repeated to all chunks
+          4. prompt_original column     — regex-parsed from original caption (movement intact)
+          5. prompt column              — fallback regex parse
         """
-        if cache is None or not txt_actions:
+        # 1. chunk_actions_json — ground truth from PT files
+        ca_json = row.get("chunk_actions_json", "")
+        if isinstance(ca_json, str) and ca_json.strip():
+            return _pad_or_truncate(_parse_chunk_actions_json(ca_json), num_chunks), "chunk_actions_json"
+
+        # 2. --action_txt_path — manually specified, shared across all videos
+        if action_txt_actions is not None:
+            return _pad_or_truncate(list(action_txt_actions), num_chunks), "action_txt_path"
+
+        # 3. CSV action_keys/action_mouse — single action repeated
+        if "action_keys" in df.columns and "action_mouse" in df.columns:
+            return [(str(row["action_keys"]), str(row["action_mouse"]))] * num_chunks, "csv_action_columns"
+
+        # 4. prompt_original — regex parse from original (movement-containing) caption
+        orig = row.get("prompt_original")
+        if isinstance(orig, str) and orig.strip():
+            return parse_prompt_to_chunk_actions(orig, num_chunks), "prompt_original_regex"
+
+        # 5. prompt — fallback
+        p = row.get("refined_prompt") or row.get("prompt", "")
+        return parse_prompt_to_chunk_actions(p, num_chunks), "prompt_regex"
+
+    def actions_to_embeds(actions, cache):
+        """Convert list of (keys, mouse) tuples → list of action embeddings."""
+        if cache is None:
             return None
-        if len(txt_actions) < num_chunks:
-            txt_actions = txt_actions + [txt_actions[-1]] * (num_chunks - len(txt_actions))
-        elif len(txt_actions) > num_chunks:
-            txt_actions = txt_actions[:num_chunks]
-        embeds = []
-        for keys, mouse in txt_actions:
-            embed = cache.get((keys, mouse), cache.get(("None", "·")))
-            embeds.append(embed)
-        return embeds
+        default = cache.get(("None", "·"))
+        return [cache.get((a[0], a[1]), default) for a in actions]
 
     # Pre-parse action txt if provided
     action_txt_actions = None
@@ -635,8 +746,9 @@ def main():
             for i, (k, m) in enumerate(action_txt_actions):
                 print(f"  chunk {i}: keys={k}, mouse={m}")
 
-    # Per-sample chunk actions log, saved to JSON for HTML visualization
+    # Per-sample metadata log, saved to inference_meta.json for HTML visualization
     chunk_actions_log = {}
+    inference_meta = {"params": {}, "samples": {}}
 
     if args.prompt_txt_path is not None:
         with open(args.prompt_txt_path, "r") as f:
@@ -701,19 +813,18 @@ def main():
         if args.max_samples > 0:
             df = df.head(args.max_samples)
 
-        # Resolve chunk actions for ALL samples before sharding (CPU-only, cheap)
         num_chunks = max(1, args.num_frames // 33)
         for _, r in df.iterrows():
-            p = r.get("refined_prompt") or r["prompt"]
-            if action_txt_actions is not None:
-                ra = action_txt_actions[:num_chunks]
-                if len(ra) < num_chunks:
-                    ra = ra + [ra[-1]] * (num_chunks - len(ra))
-            elif "action_keys" in df.columns and "action_mouse" in df.columns:
-                ra = [(str(r["action_keys"]), str(r["action_mouse"]))] * num_chunks
-            else:
-                ra = parse_prompt_to_chunk_actions(p, num_chunks)
-            chunk_actions_log[str(r["id"])] = [list(a) for a in ra]
+            ra, src = resolve_row_actions(r, df, num_chunks, action_txt_actions)
+            sid = str(r["id"])
+            chunk_actions_log[sid] = [list(a) for a in ra]
+            actual_prompt = str(r.get("refined_prompt") or r["prompt"])
+            inference_meta["samples"][sid] = {
+                "prompt": actual_prompt,
+                "prompt_original": str(r["prompt_original"]) if "prompt_original" in df.columns and pd.notna(r.get("prompt_original")) else "",
+                "action_source": src,
+                "chunk_actions": [list(a) for a in ra],
+            }
 
         if not args.enable_parallelism:
             df = df.iloc[rank::world_size]
@@ -731,19 +842,8 @@ def main():
                 else None
             )
 
-            if action_txt_actions is not None:
-                row_action_embeds = build_action_embeds_from_txt(
-                    action_txt_actions, num_chunks, action_embeds_cache,
-                )
-            elif "action_keys" in df.columns and "action_mouse" in df.columns:
-                row_action_embeds = build_action_embeds_list_single(
-                    str(row["action_keys"]), str(row["action_mouse"]),
-                    num_chunks, action_embeds_cache,
-                )
-            else:
-                row_action_embeds = build_action_embeds_from_prompt(
-                    prompt, num_chunks, action_embeds_cache,
-                )
+            row_actions, _ = resolve_row_actions(row, df, num_chunks, action_txt_actions)
+            row_action_embeds = actions_to_embeds(row_actions, action_embeds_cache)
 
             if rank == 0:
                 print(f"  [{row['id']}] chunks={num_chunks}, actions={chunk_actions_log.get(str(row['id']))}")
@@ -802,19 +902,23 @@ def main():
         if args.max_samples > 0:
             all_video_ids = all_video_ids[:args.max_samples]
 
-        # Resolve chunk actions for ALL videos before sharding (CPU-only, cheap)
         num_chunks = max(1, args.num_frames // 33)
         for vid in all_video_ids:
             group = df[df["id"] == vid]
-            if action_txt_actions is not None:
-                ra = action_txt_actions[:num_chunks]
-                if len(ra) < num_chunks:
-                    ra = ra + [ra[-1]] * (num_chunks - len(ra))
-            elif "action_keys" in group.columns and "action_mouse" in group.columns:
-                ra = [(str(r["action_keys"]), str(r["action_mouse"])) for _, r in group.iterrows()]
+            first_row = group.iloc[0]
+            ra, src = resolve_row_actions(first_row, df, num_chunks, action_txt_actions)
+            sid = str(vid)
+            chunk_actions_log[sid] = [list(a) for a in ra]
+            if "refined_prompt" in df.columns:
+                prompts = group["refined_prompt"].fillna(group["prompt"]).tolist()
             else:
-                ra = [("None", "·")] * num_chunks
-            chunk_actions_log[str(vid)] = [list(a) for a in ra]
+                prompts = group["prompt"].tolist()
+            inference_meta["samples"][sid] = {
+                "prompt": prompts[0] if len(prompts) == 1 else prompts,
+                "prompt_original": str(first_row["prompt_original"]) if "prompt_original" in df.columns and pd.notna(first_row.get("prompt_original")) else "",
+                "action_source": src,
+                "chunk_actions": [list(a) for a in ra],
+            }
 
         if not args.enable_parallelism:
             my_video_ids = all_video_ids[rank::world_size]
@@ -836,13 +940,8 @@ def main():
                 prompt_list = group_df["prompt"].tolist()
             interpolate_time_list = [args.interpolate_time] * len(prompt_list)
 
-            # Build action embeddings for inference
-            if action_txt_actions is not None:
-                csv_action_embeds = build_action_embeds_from_txt(
-                    action_txt_actions, num_chunks, action_embeds_cache,
-                )
-            else:
-                csv_action_embeds = build_action_embeds_list_from_csv(group_df, action_embeds_cache)
+            row_actions, _ = resolve_row_actions(group_df.iloc[0], df, num_chunks, action_txt_actions)
+            csv_action_embeds = actions_to_embeds(row_actions, action_embeds_cache)
 
             with torch.no_grad():
                 try:
@@ -890,18 +989,23 @@ def main():
             if not args.enable_parallelism or rank == 0:
                 export_to_video(output, output_path, fps=24)
     else:
-        # Build action embeds: txt override > single action args
         num_chunks = max(1, args.num_frames // 33)
         if action_txt_actions is not None:
-            single_action_embeds = build_action_embeds_from_txt(
-                action_txt_actions, num_chunks, action_embeds_cache,
-            )
+            single_actions = _pad_or_truncate(list(action_txt_actions), num_chunks)
+            _single_src = "action_txt_path"
+        elif args.action_keys is not None and args.action_mouse is not None:
+            single_actions = [(args.action_keys, args.action_mouse)] * num_chunks
+            _single_src = "cli_action_keys"
         else:
-            single_action_embeds = build_action_embeds_list_single(
-                args.action_keys, args.action_mouse,
-                num_chunks=num_chunks,
-                cache=action_embeds_cache,
-            )
+            single_actions = parse_prompt_to_chunk_actions(prompt, num_chunks)
+            _single_src = "prompt_regex"
+        single_action_embeds = actions_to_embeds(single_actions, action_embeds_cache)
+        inference_meta["samples"]["single"] = {
+            "prompt": prompt,
+            "prompt_original": "",
+            "action_source": _single_src,
+            "chunk_actions": [list(a) for a in single_actions],
+        }
 
         with torch.no_grad():
             output = pipe(
@@ -955,13 +1059,36 @@ def main():
 
     print(f"Max memory: {torch.cuda.max_memory_allocated() / 1024**3:.3f} GB")
 
-    # ── Save chunk actions log & generate HTML (rank 0 only) ──
+    # ── Save chunk actions log & inference metadata (rank 0 only) ──
     chunk_actions_path = None
     if rank == 0 and chunk_actions_log:
         chunk_actions_path = os.path.join(args.output_folder, "chunk_actions.json")
         with open(chunk_actions_path, "w") as f:
             json.dump(chunk_actions_log, f, ensure_ascii=False, indent=1)
         print(f"Saved chunk actions for {len(chunk_actions_log)} samples → {chunk_actions_path}")
+
+    if rank == 0 and inference_meta["samples"]:
+        inference_meta["params"] = {
+            "height": args.height,
+            "width": args.width,
+            "num_frames": args.num_frames,
+            "num_inference_steps": args.num_inference_steps,
+            "guidance_scale": args.guidance_scale,
+            "seed": args.seed,
+            "negative_prompt": args.negative_prompt or "",
+            "num_latent_frames_per_chunk": args.num_latent_frames_per_chunk,
+            "is_enable_stage2": args.is_enable_stage2,
+            "pyramid_num_inference_steps_list": args.pyramid_num_inference_steps_list,
+            "use_zero_init": args.use_zero_init,
+            "zero_steps": args.zero_steps,
+            "image_noise_sigma_min": args.image_noise_sigma_min,
+            "image_noise_sigma_max": args.image_noise_sigma_max,
+            "use_interpolate_prompt": args.use_interpolate_prompt,
+        }
+        meta_path = os.path.join(args.output_folder, "inference_meta.json")
+        with open(meta_path, "w") as f:
+            json.dump(inference_meta, f, ensure_ascii=False, indent=1)
+        print(f"Saved inference metadata → {meta_path}")
 
     if rank == 0 and args.image_prompt_csv_path is not None:
         from visualize_results import build_eval_html

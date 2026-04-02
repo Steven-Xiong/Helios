@@ -122,7 +122,7 @@ training_config:
   is_random_drop: true
   random_drop_i2v_ratio: 0.4
   random_drop_v2v_ratio: 0.4
-  random_drop_t2v_ratio: 0.3
+  random_drop_t2v_ratio: 0.0
   corrupt_model_input: false
   corrupt_mode_model_input: "noise"
   corrupt_mode_prob_model_input: 0.9

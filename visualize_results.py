@@ -70,6 +70,15 @@ HTML_HEADER = """\
     .chunk {{ display: inline-block; background: #1e2a36; border-radius: 3px; padding: 1px 6px; margin: 2px 2px; font-family: monospace; font-size: 11px; }}
     .chunk .key {{ color: #ffcc66; }}
     .chunk .mouse {{ color: #88ddaa; }}
+    .chunk .clause {{ color: #999; font-style: italic; font-family: inherit; font-size: 10px; }}
+    .meta-tags {{ margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }}
+    .meta-tag {{ display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 3px; }}
+    .meta-tag.loc {{ background: #2a3a2a; color: #a0d8a0; }}
+    .meta-tag.weather {{ background: #3a3a2a; color: #d8d8a0; }}
+    .meta-tag.tod {{ background: #2a2a3a; color: #a0a0d8; }}
+    .prompt-original {{ margin-top: 6px; font-size: 12px; line-height: 1.5; }}
+    .prompt-original summary {{ cursor: pointer; color: #c8a070; font-size: 12px; }}
+    .prompt-original .orig-text {{ color: #a08060; margin-top: 4px; }}
     .video-cell video {{ max-width: 480px; border-radius: 4px; }}
     .fname {{ font-size: 11px; color: #666; margin-top: 4px; }}
     .na {{ color: #555; }}
@@ -130,25 +139,39 @@ def _load_label_file(label_path: str) -> list[dict]:
     if "image_name" not in df.columns:
         df["image_name"] = ""
 
+    # Preserve prompt_original / caption_original if present (Sekai global CSVs)
+    if "caption_original" in df.columns and "prompt_original" not in df.columns:
+        df = df.rename(columns={"caption_original": "prompt_original"})
+
     records = []
     for _, row in df.iterrows():
         records.append({
             "sample_id": str(row["id"]),
             "prompt": str(row.get("refined_prompt") or row["prompt"]),
+            "prompt_original": str(row["prompt_original"]) if "prompt_original" in df.columns and pd.notna(row.get("prompt_original")) else "",
             "action_class": str(row.get("action_class", row.get("scene", ""))),
             "image_name": str(row.get("image_name", "")),
+            "location": str(row.get("location", "")),
+            "weather": str(row.get("weather", "")),
+            "timeOfDay": str(row.get("timeOfDay", "")),
         })
     return records
 
 
 def _render_chunk_actions_html(actions: list[list[str]]) -> str:
-    """Render per-chunk [keys, mouse] pairs as styled inline badges."""
+    """Render per-chunk [keys, mouse, clause_text?] as styled inline badges."""
     parts = []
-    for i, (keys, mouse) in enumerate(actions):
+    for i, entry in enumerate(actions):
+        keys, mouse = entry[0], entry[1]
+        clause = entry[2] if len(entry) > 2 and entry[2] else ""
+        escaped = clause.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        title_attr = f' title="{escaped}"' if escaped else ""
+        clause_span = f' <span class="clause">{escaped}</span>' if escaped else ""
         parts.append(
-            f'<span class="chunk">{i}: '
+            f'<span class="chunk"{title_attr}>{i}: '
             f'<span class="key">{keys}</span> '
-            f'<span class="mouse">{mouse}</span></span>'
+            f'<span class="mouse">{mouse}</span>'
+            f'{clause_span}</span>'
         )
     return "".join(parts)
 
@@ -167,12 +190,31 @@ def build_eval_html(
         with open(chunk_actions_path, "r") as f:
             chunk_actions_map = json.load(f)
 
+    inference_meta: dict = {}
+    meta_path = os.path.join(video_dir, "inference_meta.json")
+    if os.path.isfile(meta_path):
+        with open(meta_path, "r") as f:
+            inference_meta = json.load(f)
+
+    meta_params = inference_meta.get("params", {})
+    meta_samples = inference_meta.get("samples", {})
+
     rows_html = []
     for rec in records:
         sample_id = rec["sample_id"]
-        prompt = rec["prompt"]
+        sample_meta = meta_samples.get(sample_id, {})
+
+        # Prefer prompt from inference_meta (what was actually fed to T5)
+        prompt = sample_meta.get("prompt", rec["prompt"])
+        if isinstance(prompt, list):
+            prompt = " | ".join(prompt)
+        prompt_original = sample_meta.get("prompt_original", rec.get("prompt_original", ""))
+        action_source = sample_meta.get("action_source", "")
         action_class = rec["action_class"]
         image_name = rec["image_name"]
+        location = rec.get("location", "")
+        weather = rec.get("weather", "")
+        time_of_day = rec.get("timeOfDay", "")
 
         video_path = os.path.join(video_dir, f"{sample_id}.mp4")
         if not os.path.isfile(video_path):
@@ -196,12 +238,42 @@ def build_eval_html(
         )
         escaped_prompt = prompt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+        # Metadata tags (location, weather, timeOfDay)
+        meta_html = ""
+        tag_parts = []
+        if location and location != "nan":
+            tag_parts.append(f'<span class="meta-tag loc">{location}</span>')
+        if weather and weather != "nan":
+            tag_parts.append(f'<span class="meta-tag weather">{weather}</span>')
+        if time_of_day and time_of_day != "nan":
+            tag_parts.append(f'<span class="meta-tag tod">{time_of_day}</span>')
+        if tag_parts:
+            meta_html = f'<div class="meta-tags">{"".join(tag_parts)}</div>'
+
+        # Original prompt (before camera-movement stripping)
+        orig_html = ""
+        if prompt_original and prompt_original != "nan" and prompt_original != prompt:
+            escaped_orig = prompt_original.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            orig_html = (
+                f'<div class="prompt-original">'
+                f'<details><summary>Original Caption (action source)</summary>'
+                f'<div class="orig-text">{escaped_orig}</div>'
+                f'</details></div>'
+            )
+
+        # Action source badge
+        source_html = ""
+        if action_source:
+            source_html = f'<span class="meta-tag" style="background:#3a2a3a;color:#d8a0d8;">action: {action_source}</span>'
+
+        # Chunk actions (prefer inference_meta over chunk_actions.json)
+        ca = sample_meta.get("chunk_actions") or chunk_actions_map.get(sample_id)
         chunk_html = ""
-        if sample_id in chunk_actions_map:
-            badges = _render_chunk_actions_html(chunk_actions_map[sample_id])
+        if ca:
+            badges = _render_chunk_actions_html(ca)
             chunk_html = (
                 f'<div class="chunk-actions">'
-                f'<details><summary>Chunk Actions ({len(chunk_actions_map[sample_id])} chunks)</summary>'
+                f'<details><summary>Chunk Actions ({len(ca)} chunks)</summary>'
                 f'{badges}</details></div>'
             )
 
@@ -213,7 +285,10 @@ def build_eval_html(
             <td class="prompt-cell">
                 <div class="sample-id">{sample_id}</div>
                 {action_badge}
+                {source_html}
+                {meta_html}
                 <div class="prompt">{escaped_prompt}</div>
+                {orig_html}
                 {chunk_html}
             </td>
             <td class="video-cell">
@@ -228,7 +303,38 @@ def build_eval_html(
     html = HTML_HEADER.format(title=title)
     html += f'<h1>{title}</h1>\n'
     html += f'<div class="meta">{len(rows_html)} samples &bull; {video_dir}</div>\n'
-    html += '<table>\n<thead><tr><th>First Frame</th><th>Prompt</th><th>Generated Video</th></tr></thead>\n<tbody>\n'
+
+    if meta_params:
+        param_parts = []
+        key_order = [
+            ("height", "H"), ("width", "W"), ("num_frames", "Frames"),
+            ("num_inference_steps", "Steps"), ("guidance_scale", "CFG"),
+            ("seed", "Seed"), ("num_latent_frames_per_chunk", "ChunkFrames"),
+            ("is_enable_stage2", "Stage2"), ("use_zero_init", "ZeroInit"),
+            ("zero_steps", "ZeroSteps"),
+            ("image_noise_sigma_min", "ImgNoiseMin"), ("image_noise_sigma_max", "ImgNoiseMax"),
+            ("use_interpolate_prompt", "InterpPrompt"),
+        ]
+        for key, label in key_order:
+            if key in meta_params:
+                param_parts.append(f'<span style="margin:0 6px;"><b>{label}:</b> {meta_params[key]}</span>')
+        neg = meta_params.get("negative_prompt", "")
+        if neg:
+            escaped_neg = neg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            param_parts.append(f'<span style="margin:0 6px;"><b>NegPrompt:</b> <i>{escaped_neg}</i></span>')
+        pyramid = meta_params.get("pyramid_num_inference_steps_list")
+        if pyramid:
+            param_parts.append(f'<span style="margin:0 6px;"><b>Pyramid:</b> {pyramid}</span>')
+        html += (
+            '<div style="text-align:center;margin:8px auto 16px;padding:10px 16px;'
+            'background:#1a1a2a;border-radius:6px;max-width:1100px;font-size:12px;color:#aaa;'
+            'line-height:2;">'
+            '<b style="color:#7cb3ff;">Generation Params</b><br>'
+            + "".join(param_parts)
+            + '</div>\n'
+        )
+
+    html += '<table>\n<thead><tr><th>First Frame</th><th>Prompt &amp; Model Inputs</th><th>Generated Video</th></tr></thead>\n<tbody>\n'
     html += "".join(rows_html)
     html += "\n</tbody>\n</table>\n"
     html += HTML_FOOTER
