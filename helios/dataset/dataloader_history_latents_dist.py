@@ -50,16 +50,36 @@ class BucketedFeatureDataset(Dataset):
             self._process_folder(folder, cache_file)
 
     def _process_folder(self, folder, cache_file):
-        if self.force_rebuild or not os.path.exists(cache_file):
-            print(f"Building metadata cache for folder: {folder}")
-            folder_samples, folder_buckets = self._build_folder_metadata(folder)
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        use_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
 
-            print(f"Saving metadata cache for folder: {folder}")
-            cached_data = {"samples": folder_samples, "buckets": folder_buckets}
-            if not self.force_rebuild:
-                with open(cache_file, "wb") as f:
-                    pickle.dump(cached_data, f)
-            print(f"Cached {len(folder_samples)} samples from {folder}\n")
+        if self.force_rebuild or not os.path.exists(cache_file):
+            if local_rank == 0:
+                print(f"Building metadata cache for folder: {folder}")
+                folder_samples, folder_buckets = self._build_folder_metadata(folder)
+                cached_data = {"samples": folder_samples, "buckets": folder_buckets}
+                if not self.force_rebuild:
+                    print(f"Saving metadata cache for folder: {folder}")
+                    with open(cache_file, "wb") as f:
+                        pickle.dump(cached_data, f)
+                print(f"Cached {len(folder_samples)} samples from {folder}\n")
+
+            if use_dist:
+                torch.distributed.barrier()
+
+            if local_rank != 0:
+                if self.force_rebuild:
+                    # force_rebuild: each rank builds independently (read-only, safe)
+                    print(f"[rank {local_rank}] force_rebuild: building metadata independently for: {folder}")
+                    folder_samples, folder_buckets = self._build_folder_metadata(folder)
+                    cached_data = {"samples": folder_samples, "buckets": folder_buckets}
+                else:
+                    print(f"[rank {local_rank}] Loading cached metadata from: {folder}")
+                    with open(cache_file, "rb") as f:
+                        cached_data = pickle.load(f)
+                    folder_samples = cached_data["samples"]
+                    folder_buckets = cached_data["buckets"]
+                    print(f"[rank {local_rank}] Loaded {len(folder_samples)} samples from cache: {folder}\n")
         else:
             print(f"Loading cached metadata from: {folder}")
             with open(cache_file, "rb") as f:

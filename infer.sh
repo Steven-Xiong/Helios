@@ -56,27 +56,27 @@ ACTION_CACHE="data/helios/action_embeds_cache.pt"
 #   base_model   = Helios-Base
 #   transformer  = Helios-Base
 # ============================================================
-CKPT_S1="ckpts/helios/20260330_205224/stage1_init/checkpoint-2000-final"
-TIMESTAMP_S1=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S1="./output_helios/eval_sekai_stage1_s1init_${TIMESTAMP_S1}"
+# CKPT_S1="ckpts/helios/20260330_205224/stage1_init/checkpoint-2000-final"
+# TIMESTAMP_S1=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S1="./output_helios/eval_sekai_stage1_s1init_${TIMESTAMP_S1}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Base" \
-    --transformer_path "$LOCAL_MODELS/Helios-Base" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --lora_path "$CKPT_S1" \
-    --partial_path "$CKPT_S1/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR_S1" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --num_inference_steps 50 \
-    --guidance_scale 5.0 \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Base" \
+#     --transformer_path "$LOCAL_MODELS/Helios-Base" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --lora_path "$CKPT_S1" \
+#     --partial_path "$CKPT_S1/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S1" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --num_inference_steps 50 \
+#     --guidance_scale 5.0 \
+#     --max_samples 40 \
+#     --fps 24
 
 
 # ============================================================
@@ -87,50 +87,50 @@ torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
 #   base_model   = Helios-Base
 #   transformer  = S1I_MERGED (flat merged dir, no subfolder)
 # ============================================================
-S1I_MERGED="ckpts/helios/20260330_205224/stage1_init/merged_transformer"
-CKPT_S2="ckpts/helios/20260330_205224/stage1_post/checkpoint-2000-final"
-TIMESTAMP_S2=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S2="./output_helios/eval_sekai_stage2_s1post_${TIMESTAMP_S2}"
+# S1I_MERGED="ckpts/helios/20260330_205224/stage1_init/merged_transformer"
+# CKPT_S2="ckpts/helios/20260330_205224/stage1_post/checkpoint-2000-final"
+# TIMESTAMP_S2=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S2="./output_helios/eval_sekai_stage2_s1post_${TIMESTAMP_S2}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Base" \
-    --transformer_path "$S1I_MERGED" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --lora_path "$CKPT_S2" \
-    --partial_path "$CKPT_S2/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR_S2" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --num_inference_steps 50 \
-    --guidance_scale 5.0 \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Base" \
+#     --transformer_path "$S1I_MERGED" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --lora_path "$CKPT_S2" \
+#     --partial_path "$CKPT_S2/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S2" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --num_inference_steps 50 \
+#     --guidance_scale 5.0 \
+#     --max_samples 40 \
+#     --fps 24
 
 # ── Our-Helios-Base (S1-post merged, no LoRA) ─────────────────────────────────
 # Evaluates the fully merged Our-Helios-Base model without any LoRA overhead.
-OUR_BASE="ckpts/helios/20260330_205224/stage1_post/merged_transformer"
-TIMESTAMP_BASE=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_BASE="./output_helios/eval_sekai_stage2_our_base_${TIMESTAMP_BASE}"
+# OUR_BASE="ckpts/helios/20260330_205224/stage1_post/merged_transformer"
+# TIMESTAMP_BASE=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_BASE="./output_helios/eval_sekai_stage2_our_base_${TIMESTAMP_BASE}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Base" \
-    --transformer_path "$OUR_BASE" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --output_folder "$OUTPUT_DIR_BASE" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --num_inference_steps 50 \
-    --guidance_scale 5.0 \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Base" \
+#     --transformer_path "$OUR_BASE" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --output_folder "$OUTPUT_DIR_BASE" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --num_inference_steps 50 \
+#     --guidance_scale 5.0 \
+#     --max_samples 40 \
+#     --fps 24
 
 
 # ============================================================
@@ -141,54 +141,54 @@ torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
 #   transformer  = OUR_BASE    (Our-Helios-Base, flat merged dir)
 # ============================================================
 # OUR_BASE already set above
-S2I_CKPT="ckpts/helios/20260330_205224/stage2_init/checkpoint-2000-final"
-TIMESTAMP_S3=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S3="./output_helios/eval_sekai_stage3_s2init_${TIMESTAMP_S3}"
+# S2I_CKPT="ckpts/helios/20260330_205224/stage2_init/checkpoint-2000-final"
+# TIMESTAMP_S3=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S3="./output_helios/eval_sekai_stage3_s2init_${TIMESTAMP_S3}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Mid" \
-    --transformer_path "$OUR_BASE" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --lora_path "$S2I_CKPT" \
-    --partial_path "$S2I_CKPT/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR_S3" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --guidance_scale 5.0 \
-    --is_enable_stage2 \
-    --pyramid_num_inference_steps_list 20 20 20 \
-    --use_zero_init \
-    --zero_steps 1 \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Mid" \
+#     --transformer_path "$OUR_BASE" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --lora_path "$S2I_CKPT" \
+#     --partial_path "$S2I_CKPT/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S3" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 5.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 20 20 20 \
+#     --use_zero_init \
+#     --zero_steps 1 \
+#     --max_samples 40 \
+#     --fps 24
 
 # ── S2I_MERGED (S2-init merged, no LoRA, pyramid) ─────────────────────────────
-S2I_MERGED="ckpts/helios/20260330_205224/stage2_init/merged_transformer"
-TIMESTAMP_S2M=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S2M="./output_helios/eval_sekai_stage3_s2i_merged_${TIMESTAMP_S2M}"
+# S2I_MERGED="ckpts/helios/20260330_205224/stage2_init/merged_transformer"
+# TIMESTAMP_S2M=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S2M="./output_helios/eval_sekai_stage3_s2i_merged_${TIMESTAMP_S2M}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Mid" \
-    --transformer_path "$S2I_MERGED" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --output_folder "$OUTPUT_DIR_S2M" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --guidance_scale 5.0 \
-    --is_enable_stage2 \
-    --pyramid_num_inference_steps_list 20 20 20 \
-    --use_zero_init \
-    --zero_steps 1 \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Mid" \
+#     --transformer_path "$S2I_MERGED" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --output_folder "$OUTPUT_DIR_S2M" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 5.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 20 20 20 \
+#     --use_zero_init \
+#     --zero_steps 1 \
+#     --max_samples 40 \
+#     --fps 24
 
 
 # ============================================================
@@ -200,30 +200,55 @@ torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
 #   transformer  = S2I_MERGED  (flat merged dir)
 #   Note: stage2_post training still in progress (no final checkpoint yet)
 # ============================================================
-S2P_CKPT="ckpts/helios/20260330_205224/stage2_post/checkpoint-XXXX-final"
-TIMESTAMP_S4=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S4="./output_helios/eval_sekai_stage4_s2post_${TIMESTAMP_S4}"
+# S2P_CKPT="Helios/ckpts/helios/20260330_205224/stage2_post/checkpoint-2000-final"
+# TIMESTAMP_S4=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S4="./output_helios/eval_sekai_stage4_s2post_${TIMESTAMP_S4}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Mid" \
-    --transformer_path "$S2I_MERGED" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --lora_path "$S2P_CKPT" \
-    --partial_path "$S2P_CKPT/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR_S4" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --guidance_scale 5.0 \
-    --is_enable_stage2 \
-    --pyramid_num_inference_steps_list 20 20 20 \
-    --use_zero_init \
-    --zero_steps 1 \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Mid" \
+#     --transformer_path "$S2I_MERGED" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --lora_path "$S2P_CKPT" \
+#     --partial_path "$S2P_CKPT/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S4" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 5.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 20 20 20 \
+#     --use_zero_init \
+#     --zero_steps 1 \
+#     --max_samples 40 \
+#     --fps 24
+
+# ── Our-Helios-Mid (S2-post merged, no LoRA) ──────────────────────────────────
+# Evaluates the fully merged Our-Helios-Mid model without any LoRA overhead.
+# OUR_MID="ckpts/helios/20260330_205224/stage2_post/merged_transformer"
+# TIMESTAMP_MID=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_MID="./output_helios/eval_sekai_stage4_our_mid_${TIMESTAMP_MID}"
+
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Mid" \
+#     --transformer_path "$OUR_MID" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --output_folder "$OUTPUT_DIR_MID" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 5.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 20 20 20 \
+#     --use_zero_init \
+#     --zero_steps 1 \
+#     --max_samples 30 \
+#     --fps 24
 
 
 # ============================================================
@@ -233,30 +258,30 @@ torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
 #   base_model   = Helios-Distilled (scheduler for fast inference)
 #   transformer  = OUR_MID          (Our-Helios-Mid, 需 transformer/ 子目录)
 # ============================================================
-OUR_MID="ckpts/helios/.../stage2_post/merged_transformer"
-CKPT_S5="ckpts/helios/.../stage3_ode/checkpoint-XXXX-final"
-TIMESTAMP_S5=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S5="./output_helios/eval_sekai_stage5_s3ode_${TIMESTAMP_S5}"
+# OUR_MID already set above (stage2_post/merged_transformer)
+# CKPT_S5="ckpts/helios/.../stage3_ode/checkpoint-XXXX-final"
+# TIMESTAMP_S5=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S5="./output_helios/eval_sekai_stage5_s3ode_${TIMESTAMP_S5}"
 
-torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Distilled" \
-    --transformer_path "$OUR_MID" \
-    --sample_type i2v \
-    --image_prompt_csv_path "$SEKAI_CSV" \
-    --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --lora_path "$CKPT_S5" \
-    --partial_path "$CKPT_S5/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR_S5" \
-    --num_frames 264 \
-    --height 384 \
-    --width 640 \
-    --guidance_scale 1.0 \
-    --is_enable_stage2 \
-    --pyramid_num_inference_steps_list 2 2 2 \
-    --is_amplify_first_chunk \
-    --max_samples 40 \
-    --fps 24
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Distilled" \
+#     --transformer_path "$OUR_MID" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --lora_path "$CKPT_S5" \
+#     --partial_path "$CKPT_S5/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S5" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 1.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 2 2 2 \
+#     --is_amplify_first_chunk \
+#     --max_samples 40 \
+#     --fps 24
 
 
 # ============================================================
@@ -267,31 +292,79 @@ torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
 #   base_model   = Helios-Distilled (scheduler for fast inference)
 #   transformer  = OUR_ODE          (需 transformer/ 子目录)
 # ============================================================
-OUR_ODE="ckpts/helios/.../stage3_ode/merged_transformer"
-CKPT_S6="ckpts/helios/.../stage3_post/checkpoint-XXXX-final"
-TIMESTAMP_S6=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR_S6="./output_helios/eval_sekai_stage6_s3post_${TIMESTAMP_S6}"
+# OUR_ODE="ckpts/helios/.../stage3_ode/merged_transformer"
+# CKPT_S6="ckpts/helios/.../stage3_post/checkpoint-XXXX-final"
+# TIMESTAMP_S6=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_S6="./output_helios/eval_sekai_stage6_s3post_${TIMESTAMP_S6}"
+
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Distilled" \
+#     --transformer_path "$OUR_ODE" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --action_embeds_cache "$ACTION_CACHE" \
+#     --lora_path "$CKPT_S6" \
+#     --partial_path "$CKPT_S6/transformer_partial.pth" \
+#     --output_folder "$OUTPUT_DIR_S6" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --guidance_scale 1.0 \
+#     --is_enable_stage2 \
+#     --pyramid_num_inference_steps_list 2 2 2 \
+#     --is_amplify_first_chunk \
+#     --max_samples 40 \
+#     --fps 24
+
+
+# ============================================================
+# Ablation: Our-Helios-Base (S1-post merged), global prompt, NO action embedding
+#   Uses the fully merged Our-Helios-Base transformer (no LoRA).
+#   Prompt = movement-stripped global caption.
+#   No --action_embeds_cache → no camera control embedding.
+# ============================================================
+# OUR_BASE_ABL="ckpts/helios/20260330_205224/stage1_post/merged_transformer"
+# TIMESTAMP_ABL=$(date +%Y%m%d_%H%M%S)
+# OUTPUT_DIR_ABL="./output_helios/eval_sekai_ablation_our_basestage1_no_action_embed_${TIMESTAMP_ABL}"
+
+# torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
+#     --base_model_path "$LOCAL_MODELS/Helios-Base" \
+#     --transformer_path "$OUR_BASE_ABL" \
+#     --sample_type i2v \
+#     --image_prompt_csv_path "$SEKAI_CSV" \
+#     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
+#     --output_folder "$OUTPUT_DIR_ABL" \
+#     --num_frames 264 \
+#     --height 384 \
+#     --width 640 \
+#     --num_inference_steps 50 \
+#     --guidance_scale 5.0 \
+#     --max_samples 40 \
+#     --fps 24
+
+# ============================================================
+# Ablation: Vanilla Helios-Base (untrained), global prompt, NO action embedding
+#   Pure baseline: original pretrained Helios-Base, no LoRA, no training,
+#   no camera control embedding.
+# ============================================================
+TIMESTAMP_VANILLA=$(date +%Y%m%d_%H%M%S)
+OUTPUT_DIR_VANILLA="./output_helios/eval_sekai_ablation_helios_base_vanilla_${TIMESTAMP_VANILLA}"
 
 torchrun --nproc_per_node 8 --master_port 9805 infer_helios.py \
-    --base_model_path "$LOCAL_MODELS/Helios-Distilled" \
-    --transformer_path "$OUR_ODE" \
+    --base_model_path "$LOCAL_MODELS/Helios-Base" \
+    --transformer_path "$LOCAL_MODELS/Helios-Base" \
     --sample_type i2v \
     --image_prompt_csv_path "$SEKAI_CSV" \
     --base_image_prompt_path "$SEKAI_FIRST_FRAME" \
-    --action_embeds_cache "$ACTION_CACHE" \
-    --lora_path "$CKPT_S6" \
-    --partial_path "$CKPT_S6/transformer_partial.pth" \
-    --output_folder "$OUTPUT_DIR_S6" \
+    --output_folder "$OUTPUT_DIR_VANILLA" \
     --num_frames 264 \
     --height 384 \
     --width 640 \
-    --guidance_scale 1.0 \
-    --is_enable_stage2 \
-    --pyramid_num_inference_steps_list 2 2 2 \
-    --is_amplify_first_chunk \
+    --num_inference_steps 50 \
+    --guidance_scale 5.0 \
     --max_samples 40 \
     --fps 24
-
 
 cd /mnt/bn/voyager-sg-l3/zhexiao.xiong
 python runner.py

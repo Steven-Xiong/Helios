@@ -270,10 +270,17 @@ def build_eval_html(
         ca = sample_meta.get("chunk_actions") or chunk_actions_map.get(sample_id)
         chunk_html = ""
         if ca:
+            embeds_injected = meta_params.get("action_embeds_injected", True)
+            if embeds_injected:
+                ca_label = f"Chunk Actions ({len(ca)} chunks)"
+                ca_label_style = ""
+            else:
+                ca_label = f"Chunk Actions ({len(ca)} chunks) — parsed only, not injected"
+                ca_label_style = ' style="color:#a0a0a0;"'
             badges = _render_chunk_actions_html(ca)
             chunk_html = (
                 f'<div class="chunk-actions">'
-                f'<details><summary>Chunk Actions ({len(ca)} chunks)</summary>'
+                f'<details><summary{ca_label_style}>{ca_label}</summary>'
                 f'{badges}</details></div>'
             )
 
@@ -325,6 +332,11 @@ def build_eval_html(
         pyramid = meta_params.get("pyramid_num_inference_steps_list")
         if pyramid:
             param_parts.append(f'<span style="margin:0 6px;"><b>Pyramid:</b> {pyramid}</span>')
+        if "action_embeds_injected" in meta_params:
+            injected = meta_params["action_embeds_injected"]
+            color = "#88ddaa" if injected else "#ff8888"
+            label = "✓ ActionEmbed" if injected else "✗ ActionEmbed (ablation)"
+            param_parts.append(f'<span style="margin:0 6px;color:{color};"><b>{label}</b></span>')
         html += (
             '<div style="text-align:center;margin:8px auto 16px;padding:10px 16px;'
             'background:#1a1a2a;border-radius:6px;max-width:1100px;font-size:12px;color:#aaa;'

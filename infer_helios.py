@@ -849,6 +849,7 @@ def main():
                 print(f"  [{row['id']}] chunks={num_chunks}, actions={chunk_actions_log.get(str(row['id']))}")
 
             with torch.no_grad():
+                # import pdb; pdb.set_trace()
                 try:
                     output = pipe(
                         prompt=prompt,
@@ -1084,6 +1085,7 @@ def main():
             "image_noise_sigma_min": args.image_noise_sigma_min,
             "image_noise_sigma_max": args.image_noise_sigma_max,
             "use_interpolate_prompt": args.use_interpolate_prompt,
+            "action_embeds_injected": action_embeds_cache is not None,
         }
         meta_path = os.path.join(args.output_folder, "inference_meta.json")
         with open(meta_path, "w") as f:
